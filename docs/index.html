@@ -33,6 +33,7 @@
   .btn { display: inline-block; padding: 13px 22px; border-radius: 12px; font-weight: 650; text-decoration: none;
     background: var(--accent); color: var(--accent-text); }
   .btn.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  .btn .size { font-weight: 400; opacity: .75; margin-left: 4px; font-size: .9em; }
   .small { font-size: 14px; color: var(--muted); }
   h2 { font-size: 26px; margin: 56px 0 14px; letter-spacing: -0.01em; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
@@ -62,12 +63,12 @@
       Ask it how to keep food safe in a blackout, treat a burn, or purify water, and it answers from
       trusted sources and shows you exactly where each answer came from.</p>
     <div class="buttons">
-      <a class="btn" id="dl-mac" href="#download">Download for Mac</a>
-      <a class="btn" id="dl-win" href="#download">Download for Windows</a>
+      <a class="btn" id="dl-mac" href="#download">Download for Mac <span class="size">212 MB</span></a>
+      <a class="btn" id="dl-win" href="#download">Download for Windows <span class="size">25 MB</span></a>
       <a class="btn secondary" id="dl-src" href="#source">Source code</a>
     </div>
-    <p class="small">Free and open source. Set it up while you have internet; after that it needs none.</p>
-    <img class="shot" src="screenshot.png" alt="Survival LLM answering a question about fridge food safety, with the cited Ready.gov article open beside it">
+    <p class="small" id="device-note">Free and open source. Set it up while you have internet; after that it needs none.</p>
+    <img class="shot" src="/survival-llm/screenshot.png" alt="Survival LLM answering a question about fridge food safety, with the cited Ready.gov article open beside it">
   </section>
 
   <h2>What it does</h2>
@@ -161,6 +162,16 @@
   set("dl-win", LINKS.windows); set("dl-win-2", LINKS.windows);
   set("tests-link", LINKS.repo + "#how-the-models-did");
   set("dl-src", LINKS.repo); set("repo-link", LINKS.repo); set("sources-link", LINKS.repo + "/blob/main/SOURCES.md");
+
+  // Put the download for this visitor's computer first; phones and tablets get told it's for computers.
+  const ua = navigator.userAgent;
+  const phone = /iPhone|iPad|Android/i.test(ua) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(ua));
+  const win = /Windows/i.test(ua), mac = /Macintosh|Mac OS X/i.test(ua) && !phone;
+  const macBtn = document.getElementById("dl-mac"), winBtn = document.getElementById("dl-win");
+  if (win) { winBtn.parentNode.insertBefore(winBtn, macBtn); macBtn.classList.add("secondary"); }
+  else if (mac) winBtn.classList.add("secondary");
+  if (phone) document.getElementById("device-note").textContent =
+    "Survival LLM runs on Mac and Windows computers, not phones. Open this page on your computer to download it.";
 </script>
 </body>
 </html>
