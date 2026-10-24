@@ -12,7 +12,8 @@ and shows you the exact passage each answer came from.
 
 ## Install
 
-Do this while you have internet. After that, it needs none.
+Do this while you have internet. After that, it needs none. Setup takes 20 minutes to about 2½ hours, depending on
+your computer and internet speed (the biggest AI model is 80 GB); you only click for about 5 minutes.
 
 **Mac** (Apple Silicon, macOS 14 Sonoma or newer)
 1. Download `Survival-LLM-mac.zip` and double-click it to unzip. Move **Survival LLM** to Applications if you like.

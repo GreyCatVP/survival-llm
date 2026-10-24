@@ -269,7 +269,7 @@ function modelRows(container, { onlyFitting = false } = {}) {
 function renderModels() {
   els.modelsIntro.textContent = `This ${state.machine.os} computer has ${state.machine.ram_gb} GB of memory (RAM) and `
     + `${state.disk_free_gb} GB of free disk space. Bigger models know more but need more memory and are slower. `
-    + "Download while you have internet; downloads keep going if you close this window.";
+    + "Download while you have internet, and leave Survival LLM open until it finishes; an interrupted download picks up where it left off.";
   modelRows(els.modelsList);
 }
 function openModels() {
@@ -296,7 +296,7 @@ function progressHTML(job, doing, label) {
   const pct = job.total ? Math.round((job.completed / job.total) * 100) : 0;
   return `<p>${job.status === "unpacking" ? "Unpacking… (a few minutes)" : doing}</p>
     <progress max="100" value="${pct}" aria-label="${label}"></progress>
-    <p class="meta">${job.total ? `${(job.completed / 1e9).toFixed(1)} of ${(job.total / 1e9).toFixed(1)} GB · ` : ""}It keeps going if you close this window.</p>`;
+    <p class="meta">${job.total ? `${(job.completed / 1e9).toFixed(1)} of ${(job.total / 1e9).toFixed(1)} GB · ` : ""}Leave Survival LLM open until it finishes. If it gets interrupted, start it again and it picks up where it left off.</p>`;
 }
 function renderSetup() {
   const s = state;
