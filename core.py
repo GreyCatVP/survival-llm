@@ -186,7 +186,8 @@ def attach_excerpts(library, messages):
 
 
 TOOL_MARKUP = ("<tool_call", "<function")
-SOURCES_LINE = re.compile(r"^[*_ ]*Sources?[*_ ]*:(?![*_ ]*none).*$", re.IGNORECASE | re.MULTILINE)
+SOURCES_LINE = re.compile(r"^[*_# ]*Sources?[*_ ]*:.*$", re.IGNORECASE | re.MULTILINE)
+LIST_ITEM = re.compile(r"\s*([-*•]|\d+[.)])\s")
 # Said before the last round, after the lookups run out. Without it some models (Granite) answer the last
 # round with yet another lookup written out as text, and the person gets no answer at all.
 FINAL_NUDGE = ("(Note from the app, not the person: you have used all your library lookups. Answer the question "
@@ -201,7 +202,8 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
     limit = LENGTH_LIMITS.get(length, LENGTH_LIMITS["normal"])
     options = {"num_ctx": 32768, "num_predict": limit * 2 if deep and limit > 0 else limit,
                **SAMPLING.get(family(model), {"temperature": 0.7})}
-    sources, seen, tokens, seconds, cut_off = {}, {}, 0, 0.0, False
+    sources, seen, tokens, seconds, cut_off, looked = {}, {}, 0, 0.0, False, False
+    earlier = any(m.get("role") == "tool" for m in messages)  # lookups from earlier questions in this chat
     if library and not tools:
         for event in attach_excerpts(library, messages):
             sources.setdefault(event["id"], {k: event.get(k) for k in ("title", "source", "official")})
@@ -247,6 +249,7 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
         messages.append(entry)
         if not calls:
             break
+        looked = True
         for call in calls:
             fn = call.get("function", {})
             args = fn.get("arguments") or {}
@@ -268,12 +271,34 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
     found = _one_per_article(read + [{"id": k, **v} for k, v in seen.items()])  # read first, then the rest
     if answer.lstrip().startswith(TOOL_MARKUP):
         answer, unfinished = "", True  # a lookup written out as text, or cut off inside one: nothing to show
-    elif tools and not any(m.get("role") == "tool" for m in messages):
-        # Nothing was looked up in this conversation, yet models still write "Sources: Ready.gov, CDC" from memory.
-        answer = SOURCES_LINE.sub("Sources: none (from memory)", answer)
+    elif tools:
+        # Models cite sources they never opened (and from memory), so the app writes this line itself.
+        if read:
+            line = "Sources: " + "; ".join(f"{s['title']} ({s['source']})" for s in read[:6])
+        elif looked:
+            line = "Sources: none opened (it only saw the search results below)"
+        elif earlier:
+            line = "Sources: what it read earlier in this chat"
+        else:
+            line = "Sources: none (from memory)"
+        answer = _with_sources_line(answer, line)
     yield {"type": "done", "tokens": tokens, "seconds": seconds, "answer": answer, "cut_off": cut_off,
            "unfinished": unfinished,
            "sources": read, "seen": found[len(read):]}
+
+
+def _with_sources_line(answer, line):
+    """The answer with its last "Sources:" block (the line and any list right under it) replaced by line, or with
+    line added at the end when the model wrote none."""
+    found = list(SOURCES_LINE.finditer(answer))
+    if not found:
+        return f"{answer.rstrip()}\n\n{line}"
+    rest = answer[found[-1].end():].split("\n")
+    i = 0
+    while i < len(rest) and (not rest[i].strip() or LIST_ITEM.match(rest[i])):
+        i += 1
+    after = "\n".join(rest[i:]).strip()
+    return f"{answer[:found[-1].start()].rstrip()}\n\n{line}" + (f"\n\n{after}" if after else "")
 
 
 def _one_per_article(items):
