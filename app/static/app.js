@@ -133,8 +133,8 @@ async function loadStatus() {
 
 function schedulePoll() {
   clearTimeout(pollTimer);
-  const quick = activeJobs().length || !isReady() || state?.warming.length || state?.ollama_starting;
-  pollTimer = setTimeout(loadStatus, quick ? 1500 : 15000);
+  const quick = activeJobs().length || state?.warming.length || state?.ollama_starting || !state?.ollama;
+  pollTimer = setTimeout(loadStatus, quick ? 1500 : isReady() ? 15000 : 6000);
 }
 
 function setStatus(kind, html) {
@@ -173,10 +173,20 @@ function warm(model) {
   if (model) api("/api/warm", { method: "POST", body: JSON.stringify({ model }) }).then(loadStatus).catch(() => {});
 }
 
-function selectModel(model) {
+// A second click confirms. (A browser confirm box looks out of place in the app window: "127.0.0.1 says".)
+function confirmClick(btn, prompt) {
+  if (!btn || btn.dataset.armed) return true;
+  const original = btn.textContent;
+  btn.dataset.armed = "1";
+  btn.textContent = prompt;
+  setTimeout(() => { delete btn.dataset.armed; btn.textContent = original; }, 4000);
+  return false;
+}
+
+function selectModel(model, btn = null) {
   if (model === currentModel) { els.dialog.close(); return; }
   const chatting = els.messages.querySelector(".msg.user");
-  if (chatting && !confirm(`Switch to ${nameOf(model)}? This starts a new chat; the current one will be cleared.`)) return;
+  if (chatting && !confirmClick(btn, "Starts a new chat: click again")) return;
   currentModel = model;
   remember("model", model);
   warm(model);
@@ -219,7 +229,7 @@ function modelRows(container, { onlyFitting = false } = {}) {
       action.appendChild(b);
     };
     if (c.installed) {
-      button(current ? "In use" : "Use this", current ? "ghost" : "primary", () => selectModel(c.model), current);
+      button(current ? "In use" : "Use this", current ? "ghost" : "primary", (e) => selectModel(c.model, e.currentTarget), current);
     } else if (job && ["starting", "downloading"].includes(job.status)) {
       const pct = job.total ? Math.round((job.completed / job.total) * 100) : 0;
       action.innerHTML = `<progress max="100" value="${pct}" aria-label="Downloading ${esc(c.name)}"></progress>
@@ -249,7 +259,7 @@ function modelRows(container, { onlyFitting = false } = {}) {
         ${current ? '<span class="badge inuse">In use</span>' : ""}</div>
         <div class="mr-meta">${m.tested ? "Another copy of a model listed above." : "Not tested with Survival LLM; answers may be worse."}</div></div>
         <div class="mr-action"><button type="button" class="ghost" ${current ? "disabled" : ""}>${current ? "In use" : "Use this"}</button></div>`;
-      row.querySelector("button").onclick = () => selectModel(m.model);
+      row.querySelector("button").onclick = (e) => selectModel(m.model, e.currentTarget);
       container.appendChild(row);
     }
   }
@@ -340,8 +350,11 @@ function renderSetup() {
           to check. Pick one:</p>${failed ? `<p class="error">${esc(failed.error)}</p>` : ""}
           <div class="pack-row">${s.packs.map((p) => `<button class="ghost pack" type="button" data-pack="${esc(p.id)}">${esc(p.label)}</button>`).join("")}</div>`;
       } else {
-        libStep = `<p>Couldn't reach the list of library downloads (no internet?). Connect, and it will appear here; or put a library
-          folder at ${esc(s.library_dir)}.</p>`;
+        libStep = s.packs_error === "unavailable"
+          ? `<p>The list of library downloads isn't available right now (the download site answered, but without it). Try again
+            later; it checks again every minute.</p>`
+          : `<p>Couldn't reach the list of library downloads (no internet?). Connect, and it will appear here; or put a library
+            folder at ${esc(s.library_dir)}.</p>`;
       }
     }
     steps.push(`<div class="step ${s.library ? "done" : ""}"><h3><span class="num">${s.library ? "✓" : "3"}</span>Offline library</h3>${libStep}</div>`);
@@ -514,6 +527,9 @@ function showSources(el, ev) {
   } else if (state?.library) {
     el.insertAdjacentHTML("beforeend", `<div class="memory-note">This answer came from the AI's memory, not the library, so there's
       no source to check. Ask “look that up” to get one.</div>`);
+  } else {
+    el.insertAdjacentHTML("beforeend", `<div class="memory-note">No library installed yet, so this answer came from the AI's memory,
+      with no source to check.</div>`);
   }
   const rest = read.length ? seen : seen.slice(5);
   if (rest.length) {
@@ -646,12 +662,12 @@ $("prompt-save").onclick = () => {
 $("prompt-reset").onclick = () => savePrompt({ reset: true }, "Back to the original instructions.");
 $("close-prompt").onclick = () => $("prompt-dialog").close();
 els.dialog.onclick = (e) => { if (e.target === els.dialog) els.dialog.close(); };  // click outside closes
-$("quit").onclick = async () => {
-  if (!confirm("Stop Survival LLM? You can start it again from the app icon.")) return;
+$("quit").onclick = async (e) => {
+  if (!confirmClick(e.currentTarget, "Click again to quit")) return;
   try { await api("/api/quit", { method: "POST", body: "{}" }); } catch { /* already stopped */ }
   clearTimeout(pollTimer);
   document.body.innerHTML = `<div class="welcome" style="max-width:640px;margin:10vh auto;padding:0 16px">
-    <h1>Survival LLM has stopped.</h1><p>You can close this tab. Open the Survival LLM app to start it again.</p></div>`;
+    <h1>Survival LLM has stopped.</h1><p>You can close this window. Open Survival LLM again to start it.</p></div>`;
 };
 loadStatus();
 els.input.focus();

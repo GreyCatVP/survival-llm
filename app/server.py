@@ -50,8 +50,8 @@ CATALOG = [
     {"key": "nemotron-lightning", "name": "Nemotron 3.5 Lightning", "maker": "NVIDIA", "min_ram": 32,
      "mac": "nemotron-3.5-lightning:30b-a3b-nvfp4", "win": "nemotron-3.5-lightning:30b-a3b", "gb": {"mac": 19, "win": 25},
      "blurb": {"mac": "The fastest: answers in a few seconds and saves battery. Sometimes misses details.",
-               "win": "Quick even without a graphics card, since it uses only a small part of itself per word. "
-                      "Sometimes misses details."}},
+               "win": "The best choice for most PCs: accurate and careful. Expect up to a minute per answer "
+                      "on a typical PC."}},
     {"key": "granite-8b", "name": "Granite 4.2 8B", "maker": "IBM", "min_ram": 12,
      "mac": "granite4.2:8b", "win": "granite4.2:8b", "gb": {"mac": 6, "win": 6},
      "blurb": {"mac": "For 16 GB computers. Always looks things up and shows its sources, but makes more mistakes "
@@ -110,7 +110,7 @@ lib_version = [0]   # bumped when a new library is installed, so threads reopen 
 downloads = {}      # key -> {key, label, status, completed, total, error}; runs in background threads
 dl_lock = threading.Lock()
 warming = {}        # model -> "loading" | "error"
-manifest = {"packs": None, "failed_at": 0.0}
+manifest = {"packs": None, "failed_at": 0.0, "error": None}
 ollama_started_at = [0.0]
 quit_hooks = []     # run when someone presses Quit (closes the app window)
 quit_event = threading.Event()
@@ -199,13 +199,16 @@ def model_caps(model):
 
 
 def library_packs():
-    """Packs from the published manifest; empty when offline (checked again after a minute)."""
+    """Packs from the published manifest; empty when offline or unpublished (checked again after a minute)."""
     if manifest["packs"] is None and time.time() - manifest["failed_at"] > 60:
         try:
             with urllib.request.urlopen(MANIFEST_URL, timeout=6) as resp:
                 manifest["packs"] = json.load(resp).get("packs", [])
-        except (OSError, ValueError):
-            manifest["failed_at"] = time.time()
+            manifest["error"] = None
+        except (urllib.error.HTTPError, ValueError):  # the site answered, but without a usable list
+            manifest.update(failed_at=time.time(), error="unavailable")
+        except OSError:
+            manifest.update(failed_at=time.time(), error="offline")
     return manifest["packs"] or []
 
 
@@ -552,6 +555,7 @@ class Handler(BaseHTTPRequestHandler):
             "catalog": catalog, "downloads": jobs,
             "library": {"articles": docs, "sources": sources} if docs else None,
             "packs": [] if docs else [{k: p[k] for k in ("id", "label", "gb")} for p in library_packs()],
+            "packs_error": None if docs else manifest["error"],
             "library_dir": LIB, "disk_free_gb": disk_free_gb(),
             "machine": {"os": "macOS" if sys.platform == "darwin" else platform.system(), "ram_gb": ram_gb()},
             "topics": TOPICS}
@@ -684,12 +688,19 @@ def open_window(url):
         return False
 
 
+class QuietServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return  # the window closed a connection it kept open; nothing went wrong
+        super().handle_error(request, client_address)
+
+
 def make_server(preferred):
     """Listen on the preferred port, or any free one if something else holds it."""
     try:
-        return ThreadingHTTPServer(("127.0.0.1", preferred), Handler)
+        return QuietServer(("127.0.0.1", preferred), Handler)
     except OSError:
-        return ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        return QuietServer(("127.0.0.1", 0), Handler)
 
 
 if __name__ == "__main__":

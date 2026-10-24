@@ -33,6 +33,13 @@ Do this while you have internet. After that, it needs none.
 **Free disk space needed:** the model's size plus 5 GB, plus about 36 GB while the full library installs
 (19 GB once installed), or about 10 GB for Essentials (3 GB once installed).
 
+## Uninstall
+
+Delete the app, then these folders: the AI models, in `~/.ollama/models` (shared with any other Ollama on the
+computer, so keep it if you use Ollama elsewhere), and the library, in `~/Survival LLM Library`. The app's own
+settings are in `~/Library/Application Support/Survival LLM` on a Mac, and in `%APPDATA%\Survival LLM` plus the
+AI engine in `%LOCALAPPDATA%\Survival LLM` on Windows.
+
 ## Which model your computer gets
 
 The app checks your memory and suggests a model. More memory, smarter model.
