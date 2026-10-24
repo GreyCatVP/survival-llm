@@ -1,0 +1,657 @@
+// Survival LLM front end: chat with a local model, show what it searched and read, open its sources.
+const token = document.querySelector('meta[name="token"]').content;
+const $ = (id) => document.getElementById(id);
+const els = {
+  status: $("status"), modelName: $("model-name"), messages: $("messages"), welcome: $("welcome"),
+  using: $("using"), setup: $("setup"), composer: $("composer"), composerNote: $("composer-note"), input: $("input"), send: $("send"),
+  deep: $("deep"), length: $("length"), layout: $("layout"), reader: $("reader"), readerBody: $("reader-body"),
+  search: $("search"), searchForm: $("search-form"), dialog: $("models"), modelsList: $("models-list"),
+  modelsIntro: $("models-intro"), announce: $("announce"), libraryBtn: $("library-btn"),
+};
+let state = null;          // last /api/status
+let currentModel = null;   // Ollama name of the model answering
+let conversation = null;
+let busy = null;           // AbortController while an answer streams
+let pollTimer = null;
+let readerRequest = 0;     // ignore stale article loads
+let lastFocus = null;      // where focus returns when the reader closes
+const narrow = () => window.matchMedia("(max-width: 820px)").matches;
+
+class StaleTab extends Error {}
+
+async function api(path, opts = {}) {
+  const resp = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", "X-Token": token } });
+  if (resp.status === 403) { showStale(); throw new StaleTab("stale"); }
+  return resp;
+}
+function showStale() {
+  if ($("stale")) return;
+  document.body.insertAdjacentHTML("afterbegin", `<div id="stale" class="banner" role="alert">Survival LLM was restarted.
+    <button type="button" class="primary" onclick="location.reload()">Reload this page</button></div>`);
+}
+function remember(key, value) { try { localStorage.setItem(key, value); } catch { /* private window */ } }
+function recall(key) { try { return localStorage.getItem(key); } catch { return null; } }
+function announce(text) { els.announce.textContent = ""; setTimeout(() => { els.announce.textContent = text; }, 50); }
+
+// Server-sent events from a POST response body (": tick" heartbeat lines are ignored).
+async function* events(resp) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let cut;
+    while ((cut = buffer.indexOf("\n\n")) >= 0) {
+      const block = buffer.slice(0, cut);
+      buffer = buffer.slice(cut + 2);
+      for (const line of block.split("\n")) if (line.startsWith("data: ")) yield JSON.parse(line.slice(6));
+    }
+  }
+}
+
+// ---------- Markdown: escape everything, then render a small safe subset ----------
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+function linkify(text) {  // escaped text with its web addresses as links (they open in the browser)
+  return esc(text).replace(/https:\/\/[^\s<]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+}
+function inline(s) {
+  return s
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*\w])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>")
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1");
+}
+function md(src) {
+  let html = "", list = null, para = [], code = null;
+  const flush = () => { if (para.length) { html += "<p>" + inline(para.join("<br>")) + "</p>"; para = []; } };
+  const close = () => { if (list) { html += `</${list}>`; list = null; } };
+  for (const line of esc(src).split("\n")) {
+    if (line.trim().startsWith("```")) {
+      if (code) { html += "<pre><code>" + code.join("\n") + "</code></pre>"; code = null; }
+      else { flush(); close(); code = []; }
+      continue;
+    }
+    if (code) { code.push(line); continue; }
+    let m;
+    if ((m = line.match(/^(#{1,6})\s+(.*)/))) {
+      flush(); close();
+      const level = Math.min(m[1].length + 2, 6);
+      html += `<h${level}>${inline(m[2])}</h${level}>`;
+    } else if ((m = line.match(/^\s*[-*•]\s+(.*)/))) {
+      flush();
+      if (list !== "ul") { close(); html += "<ul>"; list = "ul"; }
+      html += "<li>" + inline(m[1]) + "</li>";
+    } else if ((m = line.match(/^\s*(\d+)[.)]\s+(.*)/))) {
+      flush();
+      if (list !== "ol") { close(); html += `<ol start="${m[1]}">`; list = "ol"; }
+      html += "<li>" + inline(m[2]) + "</li>";
+    } else if (!line.trim()) {
+      flush(); close();
+    } else if (list && /^\s{2,}\S/.test(line)) {
+      html = html.replace(/<\/li>$/, "<br>" + inline(line.trim()) + "</li>");
+    } else {
+      close(); para.push(line);
+    }
+  }
+  if (code) html += "<pre><code>" + code.join("\n") + "</code></pre>";
+  flush(); close();
+  return html;
+}
+
+// ---------- status, models, first-run setup ----------
+const nameOf = (model) => (state?.models.find((m) => m.model === model)?.name) || model || "none yet";
+const jobFor = (key) => state?.downloads.find((d) => d.key === key);
+const activeJobs = () => (state?.downloads || []).filter((d) => ["starting", "downloading", "unpacking"].includes(d.status));
+const isReady = () => state && state.ollama && state.models.length && state.library;
+const isLoaded = (model) => !!model && (state?.loaded || []).includes(model.replace(/:latest$/, ""));
+
+async function loadStatus() {
+  try {
+    state = await (await api("/api/status")).json();
+  } catch (err) {
+    if (!(err instanceof StaleTab)) setStatus("off", "Survival LLM has stopped. Open the app again.");
+    return;
+  }
+  const installed = state.models.map((m) => m.model);
+  if (!installed.includes(currentModel)) {
+    const saved = recall("model");
+    const before = currentModel;
+    currentModel = installed.includes(saved) ? saved : state.default_model;
+    if (currentModel && currentModel !== before) warm(currentModel);
+  }
+  renderStatus();
+  showModel();
+  renderSetup();
+  if (els.dialog.open) renderModels();
+  els.libraryBtn.hidden = !state.library;
+  schedulePoll();
+}
+
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  const quick = activeJobs().length || !isReady() || state?.warming.length || state?.ollama_starting;
+  pollTimer = setTimeout(loadStatus, quick ? 1500 : 15000);
+}
+
+function setStatus(kind, html) {
+  els.status.innerHTML = `<span class="dot ${kind}"></span>${html}`;
+}
+
+function renderStatus() {
+  const s = state;
+  if (!s.ollama) {
+    setStatus(s.ollama_installed ? "warn" : "off", s.ollama_installed
+      ? (s.ollama_starting ? "Starting the AI engine…" : "The AI engine (Ollama) isn't running")
+      : "Setup not finished: the AI engine is needed");
+  } else if (!s.models.length || !s.library) {
+    const missing = [!s.models.length && "an AI model", !s.library && "the library"].filter(Boolean).join(" and ");
+    setStatus("warn", `<a href="#setup">Setup not finished: needs ${missing}</a>`);
+  } else if (s.warming.includes(currentModel)) {
+    setStatus("warn", `Getting ${esc(nameOf(currentModel))} ready…`);
+  } else {
+    setStatus("on", `Ready to use without internet · ${s.library.articles.toLocaleString()} articles`);
+  }
+}
+
+function showModel() {
+  const entry = state?.catalog.find((c) => c.model === currentModel && c.installed);
+  els.modelName.textContent = nameOf(currentModel);
+  els.using.hidden = !currentModel;
+  if (currentModel) {
+    els.using.innerHTML = `Answering with <strong>${esc(nameOf(currentModel))}</strong>`
+      + (entry ? ` by ${esc(entry.maker)}. ${esc(entry.blurb)}` : ".")
+      + ` <button class="ghost" type="button" id="change-model">Change model</button>`;
+    $("change-model").onclick = openModels;
+  }
+}
+
+function warm(model) {
+  if (model) api("/api/warm", { method: "POST", body: JSON.stringify({ model }) }).then(loadStatus).catch(() => {});
+}
+
+function selectModel(model) {
+  if (model === currentModel) { els.dialog.close(); return; }
+  const chatting = els.messages.querySelector(".msg.user");
+  if (chatting && !confirm(`Switch to ${nameOf(model)}? This starts a new chat; the current one will be cleared.`)) return;
+  currentModel = model;
+  remember("model", model);
+  warm(model);
+  if (chatting) newChat();
+  if (els.dialog.open) els.dialog.close();
+  showModel();
+  renderStatus();
+  announce(`Now using ${nameOf(model)}.`);
+}
+
+// One row per catalog model (download / use), plus any other installed models.
+function modelRows(container, { onlyFitting = false } = {}) {
+  const sig = JSON.stringify([state.catalog, state.downloads, state.models, state.machine, state.disk_free_gb,
+    currentModel, onlyFitting]);
+  if (container.dataset.sig === sig) return;  // unchanged: keep the buttons a click or keyboard focus is on
+  container.dataset.sig = sig;
+  const focusedKey = document.activeElement?.closest?.(".model-row")?.dataset.key;
+  container.innerHTML = "";
+  const rows = state.catalog.filter((c) => !onlyFitting || (c.fits && c.fits_disk) || c.installed);
+  for (const c of rows) {
+    const current = c.installed && c.model === currentModel;
+    const job = jobFor(`model:${c.model}`);
+    const row = document.createElement("div");
+    row.className = "model-row" + (current ? " current" : "") + (c.fits ? "" : " unfit");
+    row.dataset.key = c.key;
+    const memory = c.fits ? `needs ${c.min_ram} GB of memory (RAM)`
+      : `needs ${c.min_ram} GB of memory (RAM); this computer has ${state.machine.ram_gb} GB`;
+    row.innerHTML = `<div class="mr-main">
+        <div class="mr-title">${esc(c.name)} <span class="mr-maker">by ${esc(c.maker)}</span>
+          ${c.recommended ? '<span class="badge">Recommended for this computer</span>' : ""}
+          ${current ? '<span class="badge inuse">In use</span>' : ""}</div>
+        <div class="mr-blurb">${esc(c.blurb)}</div>
+        <div class="mr-meta">${c.installed ? "Downloaded" : `${c.gb} GB download`} · ${memory}</div>
+      </div><div class="mr-action"></div>`;
+    const action = row.querySelector(".mr-action");
+    const button = (label, cls, onclick, disabled = false) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = cls; b.textContent = label; b.disabled = disabled; b.onclick = onclick;
+      b.setAttribute("aria-label", `${label}: ${c.name}`);
+      action.appendChild(b);
+    };
+    if (c.installed) {
+      button(current ? "In use" : "Use this", current ? "ghost" : "primary", () => selectModel(c.model), current);
+    } else if (job && ["starting", "downloading"].includes(job.status)) {
+      const pct = job.total ? Math.round((job.completed / job.total) * 100) : 0;
+      action.innerHTML = `<progress max="100" value="${pct}" aria-label="Downloading ${esc(c.name)}"></progress>
+        <p class="meta">${job.total ? `${(job.completed / 1e9).toFixed(1)} of ${(job.total / 1e9).toFixed(1)} GB` : "Starting…"}</p>`;
+    } else if (!state.ollama) {
+      action.innerHTML = `<p class="meta">Start the AI engine first</p>`;
+    } else if (!c.fits_disk) {
+      action.innerHTML = `<p class="meta">Needs ${c.gb + 5} GB free disk; ${state.disk_free_gb} GB free</p>`;
+    } else if (c.fits || onlyFitting) {
+      if (job?.status === "error") action.insertAdjacentHTML("beforeend", `<p class="meta error">${esc(job.error)}</p>`);
+      button(job?.status === "error" ? "Try again" : `Download ${c.gb} GB`, c.recommended ? "primary" : "ghost",
+        () => startModelDownload(c));
+    } else {
+      action.innerHTML = `<p class="meta">Too big for this computer</p>`;
+    }
+    container.appendChild(row);
+  }
+  const others = state.models.filter((m) => !state.catalog.some((c) => c.installed && c.model === m.model));
+  if (others.length && !onlyFitting) {
+    container.insertAdjacentHTML("beforeend", `<div class="group-title">Other models on this computer</div>`);
+    for (const m of others) {
+      const current = m.model === currentModel;
+      const row = document.createElement("div");
+      row.className = "model-row" + (current ? " current" : "");
+      row.dataset.key = m.model;
+      row.innerHTML = `<div class="mr-main"><div class="mr-title">${esc(m.name)}
+        ${current ? '<span class="badge inuse">In use</span>' : ""}</div>
+        <div class="mr-meta">${m.tested ? "Another copy of a model listed above." : "Not tested with Survival LLM; answers may be worse."}</div></div>
+        <div class="mr-action"><button type="button" class="ghost" ${current ? "disabled" : ""}>${current ? "In use" : "Use this"}</button></div>`;
+      row.querySelector("button").onclick = () => selectModel(m.model);
+      container.appendChild(row);
+    }
+  }
+  if (focusedKey) container.querySelector(`.model-row[data-key="${CSS.escape(focusedKey)}"] button`)?.focus();
+}
+
+function renderModels() {
+  els.modelsIntro.textContent = `This ${state.machine.os} computer has ${state.machine.ram_gb} GB of memory (RAM) and `
+    + `${state.disk_free_gb} GB of free disk space. Bigger models know more but need more memory and are slower. `
+    + "Download while you have internet; downloads keep going if you close this window.";
+  modelRows(els.modelsList);
+}
+function openModels() {
+  if (!state) return;
+  renderModels();
+  els.dialog.showModal();
+}
+
+async function startModelDownload(c) {
+  try {
+    const resp = await api("/api/pull", { method: "POST", body: JSON.stringify({ model: c.model }) });
+    if (resp.status === 409) announce(`${c.name} is already downloading.`);
+  } catch { /* status polling shows any problem */ }
+  loadStatus();
+}
+
+async function startLibraryDownload(pack) {
+  try { await api("/api/library", { method: "POST", body: JSON.stringify({ pack }) }); } catch { /* shown via status */ }
+  loadStatus();
+}
+
+let doneJobs = new Set(), setupSig = "";
+function progressHTML(job, doing, label) {
+  const pct = job.total ? Math.round((job.completed / job.total) * 100) : 0;
+  return `<p>${job.status === "unpacking" ? "Unpacking… (a few minutes)" : doing}</p>
+    <progress max="100" value="${pct}" aria-label="${label}"></progress>
+    <p class="meta">${job.total ? `${(job.completed / 1e9).toFixed(1)} of ${(job.total / 1e9).toFixed(1)} GB · ` : ""}It keeps going if you close this window.</p>`;
+}
+function renderSetup() {
+  const s = state;
+  // A model that just finished downloading becomes the one in use if nothing is selected yet.
+  for (const job of s.downloads.filter((d) => d.status === "done" && d.key.startsWith("model:"))) {
+    if (doneJobs.has(job.key)) continue;
+    doneJobs.add(job.key);
+    const model = job.key.slice(6).replace(/:latest$/, "");
+    if (!currentModel && s.models.some((m) => m.model === model)) selectModel(model);
+  }
+  const hasModel = s.models.length > 0;
+  const steps = [];
+  let step1;
+  const engineJob = jobFor("engine");
+  const engineBusy = engineJob && ["starting", "downloading", "unpacking"].includes(engineJob.status);
+  if (s.ollama) step1 = "<p>Running.</p>";
+  else if (engineBusy) step1 = progressHTML(engineJob, "Downloading the AI engine", "AI engine download");
+  else if (s.ollama_installed) step1 = `<p>${s.ollama_starting ? "Starting the AI engine… (this takes a few seconds)" : "The AI engine isn't running."}</p>
+    <button class="ghost" type="button" id="start-ollama">Start it</button>`;
+  else if (s.engine?.downloadable) step1 = `<p>The AI engine (Ollama, free and open source) runs the model on this computer. It's a
+    one-time ${s.engine.gb} GB download, and nothing else to install.</p>
+    ${engineJob?.status === "error" ? `<p class="error">${esc(engineJob.error)}</p>` : ""}
+    <button class="primary" type="button" id="get-engine">Download the AI engine (${s.engine.gb} GB)</button>`;
+  else step1 = `<p>Survival LLM uses the free Ollama app to run the AI on this computer. Install it while you have internet:
+    <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a>. You don't need Ollama's own
+    window; it just has to be running. This page notices on its own when it is.</p>`;
+  steps.push(`<div class="step ${s.ollama ? "done" : ""}"><h3><span class="num">${s.ollama ? "✓" : "1"}</span>AI engine</h3>${step1}</div>`);
+  if (s.ollama) {
+    const fitting = s.catalog.filter((c) => c.fits && c.fits_disk);
+    let modelStep;
+    if (hasModel) modelStep = `<p>Using ${esc(nameOf(currentModel))}. You can change it any time with Model at the top.</p>`;
+    else if (fitting.length) modelStep = `<p>Pick one for this ${esc(s.machine.os)} computer (${s.machine.ram_gb} GB of memory,
+      ${s.disk_free_gb} GB free disk). The recommended one is the smartest that fits.</p><div id="setup-models"></div>`;
+    else {
+      const small = s.catalog.reduce((a, b) => (b.gb < a.gb ? b : a));
+      modelStep = `<p>This computer has ${s.machine.ram_gb} GB of memory and ${s.disk_free_gb} GB free disk; even the smallest model
+        (${esc(small.name)}) wants ${small.min_ram} GB of memory and ${small.gb + 5} GB of disk. You can try it anyway (answers will be
+        slow), or use Search library without the AI.</p>
+        <button class="ghost" type="button" id="try-anyway">Try ${esc(small.name)} anyway (${small.gb} GB)</button>`;
+    }
+    steps.push(`<div class="step ${hasModel ? "done" : ""}"><h3><span class="num">${hasModel ? "✓" : "2"}</span>AI model</h3>${modelStep}</div>`);
+    let libStep;
+    if (s.library) libStep = `<p>Installed: ${s.library.articles.toLocaleString()} articles.</p>`;
+    else {
+      const jobs = (s.packs || []).map((p) => jobFor(`library:${p.id}`)).filter(Boolean);
+      const active = jobs.find((j) => ["starting", "downloading", "unpacking"].includes(j.status));
+      const failed = jobs.find((j) => j.status === "error");
+      if (active) libStep = progressHTML(active, `Downloading ${esc(active.label)}`, "Library download");
+      else if (s.packs?.length) {
+        libStep = `<p>The articles the AI looks things up in. Without it, answers come only from the model's memory, with no sources
+          to check. Pick one:</p>${failed ? `<p class="error">${esc(failed.error)}</p>` : ""}
+          <div class="pack-row">${s.packs.map((p) => `<button class="ghost pack" type="button" data-pack="${esc(p.id)}">${esc(p.label)}</button>`).join("")}</div>`;
+      } else {
+        libStep = `<p>Couldn't reach the list of library downloads (no internet?). Connect, and it will appear here; or put a library
+          folder at ${esc(s.library_dir)}.</p>`;
+      }
+    }
+    steps.push(`<div class="step ${s.library ? "done" : ""}"><h3><span class="num">${s.library ? "✓" : "3"}</span>Offline library</h3>${libStep}</div>`);
+  }
+  const needsSetup = !isReady();
+  els.setup.hidden = !needsSetup;
+  if (!needsSetup) { els.setup.innerHTML = ""; setupSig = ""; return; }
+  const html = `<h2 class="setup-title">Set up Survival LLM</h2>
+    <p class="meta">Do this while you have internet. Afterwards everything works without it.</p>` + steps.join("");
+  const sig = html + JSON.stringify([s.catalog, s.downloads, s.models, currentModel]);
+  if (sig === setupSig) return;  // rebuilding an unchanged card would knock keyboard focus off its buttons
+  setupSig = sig;
+  const focusedId = document.activeElement?.id, focusedPack = document.activeElement?.dataset?.pack;
+  els.setup.innerHTML = html;
+  if ($("start-ollama")) $("start-ollama").onclick = () => api("/api/start-ollama", { method: "POST", body: "{}" }).then(loadStatus);
+  if ($("get-engine")) $("get-engine").onclick = () => api("/api/engine", { method: "POST", body: "{}" }).then(loadStatus);
+  if ($("try-anyway")) $("try-anyway").onclick = () => startModelDownload(s.catalog.reduce((a, b) => (b.gb < a.gb ? b : a)));
+  const box = $("setup-models");
+  if (box) modelRows(box, { onlyFitting: true });
+  for (const b of els.setup.querySelectorAll(".pack")) b.onclick = () => startLibraryDownload(b.dataset.pack);
+  if (focusedId && $(focusedId)) $(focusedId).focus();
+  if (focusedPack) els.setup.querySelector(`.pack[data-pack="${CSS.escape(focusedPack)}"]`)?.focus();
+}
+
+// ---------- chat ----------
+function addMessage(role, html) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.innerHTML = html;
+  els.messages.appendChild(div);
+  return div;
+}
+function scrollDown() {
+  const m = els.messages;
+  if (m.scrollHeight - m.scrollTop - m.clientHeight < 160) m.scrollTop = m.scrollHeight;
+}
+function setBusy(controller) {
+  busy = controller;
+  els.send.textContent = controller ? "Stop" : "Send";
+  els.send.classList.toggle("stop", !!controller);
+  els.send.setAttribute("aria-label", controller ? "Stop the answer" : "Send question");
+}
+function newChat() {
+  if (busy) busy.abort();
+  conversation = null;
+  for (const m of [...els.messages.querySelectorAll(".msg")]) m.remove();
+  els.welcome.hidden = false;
+}
+
+function sourceButton(source, how, strong) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "chip" + (strong ? " read" : "");
+  b.innerHTML = `${esc(source.title)} <span class="src">· ${esc(source.source)}</span>${source.official ? ' <span class="official" title="Published by a government or health agency. They do not endorse this app.">Official</span>' : ""}`;
+  b.onclick = () => openArticle(source.id, how, b);
+  return b;
+}
+
+function needModel(text) {  // keep the question in the box so it can be sent once a model is ready
+  els.input.value = text;
+  autosize();
+  els.composerNote.textContent = "Download an AI model first (step 2 of the setup above). Your question will wait here.";
+  els.composerNote.hidden = false;
+  announce(els.composerNote.textContent);
+  els.setup.scrollIntoView({ behavior: "smooth" });
+}
+
+async function ask(text) {
+  text = text.trim();
+  if (busy || !text) return;
+  if (!currentModel) { await loadStatus(); if (!currentModel) { needModel(text); return; } }
+  els.composerNote.hidden = true;
+  const model = currentModel;
+  const firstLoad = !isLoaded(model);
+  els.welcome.hidden = true;
+  addMessage("user", `<div class="bubble">${esc(text)}</div>`);
+  const msg = addMessage("assistant", `<details class="how" open><summary>Working on it…</summary><div class="activity"></div></details>
+    <div class="answer cursor"></div><div class="meta"></div><div class="sources"></div>`);
+  const how = msg.querySelector(".how"), summary = how.querySelector("summary"), activity = how.querySelector(".activity");
+  const answerEl = msg.querySelector(".answer"), meta = msg.querySelector(".meta"), sourcesEl = msg.querySelector(".sources");
+  const started = Date.now();
+  let answer = "", queued = false, steps = 0, failed = false;
+  const tick = setInterval(() => {
+    summary.textContent = `${nameOf(model)} is working on it… ${Math.round((Date.now() - started) / 1000)} s`;
+  }, 1000);
+  const render = () => { queued = false; answerEl.innerHTML = md(answer); scrollDown(); };
+  const note = (label, id, howText) => {
+    const el = document.createElement(id ? "button" : "div");
+    el.textContent = label;
+    if (id) { el.type = "button"; el.className = "linklike"; el.onclick = () => openArticle(id, howText, el); }
+    activity.appendChild(el);
+    steps += 1;
+    scrollDown();
+  };
+  if (firstLoad) note("Loading the AI into memory. The first answer can take a minute, and the fans may spin up; that's normal.");
+  setBusy(new AbortController());
+  scrollDown();
+  try {
+    if (!conversation) {
+      conversation = (await (await api("/api/new", { method: "POST", body: "{}" })).json()).conversation;
+    }
+    const resp = await api("/api/chat", {
+      method: "POST", signal: busy.signal,
+      body: JSON.stringify({ conversation, model, message: text, deep: els.deep.checked, length: els.length.value }),
+    });
+    if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || `error ${resp.status}`);
+    for await (const ev of events(resp)) {
+      if (["search", "read", "show"].includes(ev.type) && answer) { answer = ""; render(); } // text before a lookup is not the answer
+      if (ev.type === "search") note(`Searched the library: “${ev.query}”`);
+      else if (ev.type === "read") note(`Read: ${ev.title} · ${ev.source}`, ev.id, "The answer used this part");
+      else if (ev.type === "show") {
+        note(`Opened for you: ${ev.title}`, ev.id, "The answer pointed here");
+        if (!narrow()) openArticle(ev.id, "The answer pointed here");
+      } else if (ev.type === "token") {
+        answer += ev.text;
+        if (!queued) { queued = true; requestAnimationFrame(render); }
+      } else if (ev.type === "error") {
+        failed = true;
+        meta.textContent = ev.message;
+        meta.classList.add("error");
+      } else if (ev.type === "done") {
+        answer = ev.answer || answer;
+        render();
+        showSources(sourcesEl, ev);
+        const secs = Math.round((Date.now() - started) / 1000);
+        meta.textContent = ev.cut_off
+          ? `${nameOf(model)} was stopped after ${secs} s because the answer reached the length limit. Keep going, or raise the limit below.`
+          : ev.unfinished
+            ? `${nameOf(model)} kept looking things up and didn't finish an answer. Try asking again, or open the articles it read.`
+            : `Answered by ${nameOf(model)} in ${secs} s`;
+        meta.title = ev.seconds ? `${ev.tokens} tokens at ${Math.round(ev.tokens / ev.seconds)} tokens per second` : "";
+        if (ev.cut_off) {
+          const more = document.createElement("button");
+          more.type = "button";
+          more.className = "ghost keep-going";
+          more.textContent = "Keep going";
+          more.onclick = () => { more.remove(); ask("Please continue exactly where you stopped."); };
+          meta.after(more);
+        }
+        announce(`Answer ready from ${nameOf(model)}.`);
+      }
+    }
+  } catch (err) {
+    failed = true;
+    if (err instanceof StaleTab) { /* banner shown */ }
+    // Notes go in the meta line: a pending render() would wipe anything added to the answer itself.
+    else if (err.name === "AbortError") meta.textContent = "Stopped.";
+    else { meta.textContent = `Couldn't get an answer: ${err.message || err}`; meta.classList.add("error"); }
+  } finally {
+    clearInterval(tick);
+    summary.textContent = steps ? `How it found this (${steps} step${steps === 1 ? "" : "s"})` : "Details";
+    how.open = false;
+    if (!steps) how.hidden = true;
+    answerEl.classList.remove("cursor");
+    setBusy(null);
+    if (failed) loadStatus();
+    else if (!isLoaded(model)) state.loaded = [...(state.loaded || []), model.replace(/:latest$/, "")];
+  }
+}
+
+function showSources(el, ev) {
+  el.innerHTML = "";
+  const read = ev.sources || [], seen = ev.seen || [];
+  if (read.length) {
+    el.insertAdjacentHTML("beforeend", `<div class="label">Sources it read · click to open</div>`);
+    for (const s of read) el.appendChild(sourceButton(s, "The answer used this part", true));
+  } else if (seen.length) {
+    el.insertAdjacentHTML("beforeend", `<div class="label">Found in the library · click to open</div>`);
+    for (const s of seen.slice(0, 5)) el.appendChild(sourceButton(s, "This matched the search", true));
+  } else if (state?.library) {
+    el.insertAdjacentHTML("beforeend", `<div class="memory-note">This answer came from the AI's memory, not the library, so there's
+      no source to check. Ask “look that up” to get one.</div>`);
+  }
+  const rest = read.length ? seen : seen.slice(5);
+  if (rest.length) {
+    const more = document.createElement("details");
+    more.className = "more";
+    more.innerHTML = `<summary>Other search results (${rest.length})</summary>`;
+    const wrap = document.createElement("div");
+    wrap.className = "sources";
+    for (const s of rest.slice(0, 15)) wrap.appendChild(sourceButton(s, "This matched the search", false));
+    more.appendChild(wrap);
+    el.appendChild(more);
+  }
+}
+
+// ---------- reader ----------
+function showReader(opener) {
+  if (opener) lastFocus = opener;
+  els.reader.hidden = false;
+  els.layout.classList.add("with-reader");
+}
+function hideReader() {
+  els.reader.hidden = true;
+  els.layout.classList.remove("with-reader");
+  if (lastFocus && document.contains(lastFocus)) lastFocus.focus();
+}
+
+async function openArticle(id, how = "This matched the search", opener = null) {
+  const request = ++readerRequest;
+  showReader(opener);
+  els.readerBody.innerHTML = `<p class="meta">Opening…</p>`;
+  let doc;
+  try {
+    const resp = await api(`/api/article?id=${encodeURIComponent(id)}`);
+    if (!resp.ok) throw new Error();
+    doc = await resp.json();
+  } catch {
+    if (request === readerRequest) els.readerBody.innerHTML = `<p class="error">Couldn't open that source.</p>`;
+    return;
+  }
+  if (request !== readerRequest) return;  // a newer source was opened meanwhile
+  let html = `<div class="doc-head"><h2 id="doc-title" tabindex="-1">${esc(doc.title)}</h2>
+    <div class="src-line">${esc(doc.source)}${doc.official ? ' <span class="official" title="Published by a government or health agency. They do not endorse this app.">Official</span>' : ""}${doc.url ? " · " + esc(doc.url) : ""}</div>
+    ${doc.license ? `<div class="src-line license">License: ${linkify(doc.license)}</div>` : ""}</div>`;
+  for (const part of doc.parts) {
+    const cited = part.id === doc.focus;
+    html += `<section class="${cited ? "cited" : ""}">${cited ? `<div class="cited-label">${esc(how)}</div>` : ""}${md(part.text)}</section>`;
+  }
+  els.readerBody.innerHTML = html;
+  const target = els.readerBody.querySelector("section.cited");
+  if (target && doc.parts[0].id !== doc.focus) {
+    target.style.scrollMarginTop = `${els.readerBody.querySelector(".doc-head").offsetHeight + 8}px`;  // clear of the sticky title
+    target.scrollIntoView({ block: "start" });
+  }
+  else els.readerBody.scrollTop = 0;
+  if (opener) $("doc-title").focus({ preventScroll: true });
+}
+
+async function searchLibrary(q) {
+  const request = ++readerRequest;
+  showReader(els.search);
+  els.readerBody.innerHTML = `<p class="meta">Searching…</p>`;
+  let results = [];
+  try { results = (await (await api(`/api/search?q=${encodeURIComponent(q)}`)).json()).results; } catch { /* below */ }
+  if (request !== readerRequest) return;
+  els.readerBody.innerHTML = results.length
+    ? `<p class="meta">${results.length} results for “${esc(q)}”</p>` + results.map((r) => `<button type="button" class="result" data-id="${r.id}">
+        <span class="r-title">${esc(r.title)}</span><span class="r-src">${esc(r.source)}${r.official ? ' <span class="official" title="Published by a government or health agency. They do not endorse this app.">Official</span>' : ""}</span>
+        <span class="r-snip">${esc(r.snippet)}</span></button>`).join("")
+    : `<p class="meta">Nothing found for “${esc(q)}”. Try fewer or different words.</p>`;
+  for (const el of els.readerBody.querySelectorAll(".result")) el.onclick = () => openArticle(+el.dataset.id, "This matched your search", el);
+}
+
+// ---------- wiring ----------
+function autosize() {
+  els.input.style.height = "auto";
+  els.input.style.height = Math.min(els.input.scrollHeight, 200) + "px";
+}
+els.composer.onsubmit = (e) => {
+  e.preventDefault();
+  if (busy) { busy.abort(); return; }  // the button reads "Stop" while an answer streams
+  const text = els.input.value;
+  els.input.value = "";
+  autosize();
+  ask(text);
+};
+els.input.onkeydown = (e) => {
+  if (e.key !== "Enter" || e.shiftKey || e.isComposing || e.keyCode === 229) return;
+  e.preventDefault();
+  if (!busy) els.composer.requestSubmit();  // Enter never stops an answer; only the Stop button does
+};
+els.input.oninput = autosize;
+for (const b of document.querySelectorAll(".example")) b.onclick = () => ask(b.textContent);
+els.length.value = recall("length") || "normal";
+els.length.onchange = () => remember("length", els.length.value);
+els.searchForm.onsubmit = (e) => { e.preventDefault(); if (els.search.value.trim()) searchLibrary(els.search.value.trim()); };
+els.libraryBtn.onclick = () => { showReader(els.libraryBtn); els.search.focus(); };
+$("close-reader").onclick = hideReader;
+els.reader.onkeydown = (e) => { if (e.key === "Escape") hideReader(); };
+$("new-chat").onclick = () => { newChat(); els.input.focus(); };
+$("model-btn").onclick = openModels;
+$("close-models").onclick = () => els.dialog.close();
+
+// ---------- the AI's instructions, viewable and editable ----------
+let promptDefault = "";
+$("prompt-btn").onclick = async () => {
+  $("prompt-status").textContent = "";
+  try {
+    const p = await (await api("/api/prompt")).json();
+    promptDefault = p.default;
+    $("prompt-text").value = p.custom || p.default;
+    $("prompt-status").textContent = p.custom ? "Using your edited instructions." : "Using the original instructions.";
+  } catch {
+    $("prompt-status").textContent = "Couldn't load the instructions.";
+  }
+  $("prompt-dialog").showModal();
+};
+async function savePrompt(body, done) {
+  try {
+    const p = await (await api("/api/prompt", { method: "POST", body: JSON.stringify(body) })).json();
+    $("prompt-text").value = p.custom || promptDefault;
+    $("prompt-status").textContent = done;
+  } catch {
+    $("prompt-status").textContent = "Couldn't save. Is Survival LLM still running?";
+  }
+}
+$("prompt-save").onclick = () => {
+  const text = $("prompt-text").value.trim();
+  savePrompt(text === promptDefault.trim() ? { reset: true } : { text }, "Saved. Used from your next question.");
+};
+$("prompt-reset").onclick = () => savePrompt({ reset: true }, "Back to the original instructions.");
+$("close-prompt").onclick = () => $("prompt-dialog").close();
+els.dialog.onclick = (e) => { if (e.target === els.dialog) els.dialog.close(); };  // click outside closes
+$("quit").onclick = async () => {
+  if (!confirm("Stop Survival LLM? You can start it again from the app icon.")) return;
+  try { await api("/api/quit", { method: "POST", body: "{}" }); } catch { /* already stopped */ }
+  clearTimeout(pollTimer);
+  document.body.innerHTML = `<div class="welcome" style="max-width:640px;margin:10vh auto;padding:0 16px">
+    <h1>Survival LLM has stopped.</h1><p>You can close this tab. Open the Survival LLM app to start it again.</p></div>`;
+};
+loadStatus();
+els.input.focus();

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="token" content="{{TOKEN}}">
+<title>Survival LLM</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo" aria-hidden="true"></span>Survival LLM</div>
+  <div class="status" id="status">Starting…</div>
+  <div class="controls">
+    <button id="model-btn" class="ghost model-btn" type="button" title="Choose which AI model answers">
+      Model: <strong id="model-name">none yet</strong> <span aria-hidden="true">▾</span>
+    </button>
+    <button id="library-btn" class="ghost" type="button">Search library</button>
+    <button id="prompt-btn" class="ghost" type="button" title="See and edit the instructions the AI follows">Instructions</button>
+    <button id="new-chat" class="ghost" type="button">New chat</button>
+    <button id="quit" class="ghost" type="button" title="Stop Survival LLM">Quit</button>
+  </div>
+</header>
+
+<main id="layout" class="layout">
+  <section class="chat" aria-label="Chat">
+    <div id="messages" class="messages">
+      <div id="setup" class="setup" hidden></div>
+      <div id="welcome" class="welcome">
+        <h1>Ask anything. No internet needed.</h1>
+        <p>A local AI looks things up in an offline library of medical, emergency, how-to and encyclopedia
+          articles, then tells you where each answer came from. Click a source to read it yourself.</p>
+        <p class="using" id="using" hidden></p>
+        <div class="examples">
+          <button type="button" class="example">The power is out. How long is the food in my fridge safe?</button>
+          <button type="button" class="example">Where can I safely run a generator?</button>
+          <button type="button" class="example">How do I make tap water safe to drink?</button>
+          <button type="button" class="example">Someone burned their hand on the stove. What do I do?</button>
+        </div>
+      </div>
+    </div>
+    <form id="composer" class="composer">
+      <p id="composer-note" class="composer-note" hidden></p>
+      <textarea id="input" rows="1" placeholder="Ask a question…" aria-label="Your question"></textarea>
+      <div class="composer-row">
+        <div class="options">
+          <label class="think"><input type="checkbox" id="deep"> Think harder (slower, more careful)</label>
+          <label class="think" title="Normal stops an answer after about 6,000 words, Long after about 25,000. None never stops it on its own; use Stop if it gets stuck.">Length limit
+            <select id="length">
+              <option value="normal">Normal</option>
+              <option value="long">Long</option>
+              <option value="none">None</option>
+            </select></label>
+        </div>
+        <button type="submit" id="send" aria-label="Send question">Send</button>
+      </div>
+      <p class="footnote">AI can make mistakes. Check the sources.</p>
+    </form>
+  </section>
+
+  <aside id="reader" class="reader" hidden aria-label="Library and sources">
+    <div class="reader-head">
+      <form id="search-form" class="search-form" role="search">
+        <input id="search" type="search" placeholder="Search the library yourself…" aria-label="Search the library">
+      </form>
+      <button id="close-reader" class="ghost icon" type="button" aria-label="Close">✕</button>
+    </div>
+    <div id="reader-body" class="reader-body"></div>
+  </aside>
+</main>
+
+<dialog id="models" class="dialog" aria-labelledby="models-title">
+  <div class="dialog-head">
+    <h2 id="models-title">AI models</h2>
+    <button id="close-models" class="ghost icon" type="button" aria-label="Close">✕</button>
+  </div>
+  <p class="meta" id="models-intro"></p>
+  <div id="models-list"></div>
+</dialog>
+<dialog id="prompt-dialog" class="dialog wide" aria-labelledby="prompt-title">
+  <div class="dialog-head">
+    <h2 id="prompt-title">AI instructions</h2>
+    <button id="close-prompt" class="ghost icon" type="button" aria-label="Close">✕</button>
+  </div>
+  <p class="meta">Survival LLM gives the AI these instructions at the start of every conversation. Change them to change
+    how it answers. Your version applies to every model, from your next question; Reset brings back the original.</p>
+  <textarea id="prompt-text" class="prompt-text" spellcheck="false" aria-label="AI instructions"></textarea>
+  <div class="prompt-actions">
+    <span id="prompt-status" class="meta" aria-live="polite"></span>
+    <button id="prompt-reset" class="ghost" type="button">Reset to default</button>
+    <button id="prompt-save" class="primary" type="button">Save</button>
+  </div>
+</dialog>
+<div id="announce" class="sr-only" aria-live="polite"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
