@@ -15,12 +15,13 @@ let busy = null;           // AbortController while an answer streams
 let pollTimer = null;
 let readerRequest = 0;     // ignore stale article loads
 let lastFocus = null;      // where focus returns when the reader closes
+let restarting = false;    // an update is installing; the app will restart
 const narrow = () => window.matchMedia("(max-width: 820px)").matches;
 
 class StaleTab extends Error {}
 
 async function api(path, opts = {}) {
-  const resp = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", "X-Token": token } });
+  const resp = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", "X-Token": token, ...opts.headers } });
   if (resp.status === 403) { showStale(); throw new StaleTab("stale"); }
   return resp;
 }
@@ -113,7 +114,13 @@ async function loadStatus() {
   try {
     state = await (await api("/api/status")).json();
   } catch (err) {
-    if (!(err instanceof StaleTab)) setStatus("off", "Survival LLM has stopped. Open the app again.");
+    if (err instanceof StaleTab) return;
+    if (restarting) {  // the new version starts in a few seconds (with a new page token, so this page then asks to reload)
+      setStatus("warn", "Restarting into the new version…");
+      pollTimer = setTimeout(loadStatus, 2000);
+      return;
+    }
+    setStatus("off", "Survival LLM has stopped. Open the app again.");
     return;
   }
   const installed = state.models.map((m) => m.model);
@@ -127,7 +134,8 @@ async function loadStatus() {
   showModel();
   renderSetup();
   if (els.dialog.open) renderModels();
-  els.libraryBtn.hidden = !state.library;
+  els.libraryBtn.hidden = !state.library && !state.my_files?.ready;
+  renderVersion();
   schedulePoll();
 }
 
@@ -153,7 +161,8 @@ function renderStatus() {
   } else if (s.warming.includes(currentModel)) {
     setStatus("warn", `Getting ${esc(nameOf(currentModel))} ready…`);
   } else {
-    setStatus("on", `Ready to use without internet · ${s.library.articles.toLocaleString()} articles`);
+    const mine = s.my_files?.ready ? ` + ${s.my_files.ready.toLocaleString()} of your files` : "";
+    setStatus("on", `Ready to use without internet · ${s.library.articles.toLocaleString()} articles${mine}`);
   }
 }
 
@@ -631,6 +640,232 @@ els.reader.onkeydown = (e) => { if (e.key === "Escape") hideReader(); };
 $("new-chat").onclick = () => { newChat(); els.input.focus(); };
 $("model-btn").onclick = openModels;
 $("close-models").onclick = () => els.dialog.close();
+
+// ---------- the person's own files ----------
+const FILE_TYPES = [".pdf", ".docx", ".odt", ".epub", ".html", ".htm", ".txt", ".md", ".markdown", ".csv"];
+const CANT_READ = "Survival LLM can't read this kind of file. It reads PDF, Word, EPUB, web pages and text files.";
+const filesDialog = $("files-dialog");
+let myFiles = null;        // last /api/myfiles
+let filesTimer = null, filesSig = "", filesChecks = 0, adding = 0;
+let fileNotes = [];        // what happened to the files just added or removed: {text, error}
+let addedNames = [];       // files added since the window opened, reported in one line
+let fileAsks = [];         // files whose name is taken, waiting for Replace it or Keep both: {file, name}
+
+const readable = (name) => FILE_TYPES.some((t) => name.toLowerCase().endsWith(t));
+const trashName = () => (state?.machine.os === "Windows" ? "Recycle Bin" : "Trash");
+
+function openFiles() {
+  fileNotes = [];
+  addedNames = [];
+  filesSig = "";
+  if (!filesDialog.open) filesDialog.showModal();
+  refreshFiles(true);
+}
+
+async function refreshFiles(check = false) {
+  clearTimeout(filesTimer);
+  try { myFiles = await (await api(`/api/myfiles${check ? "?check=1" : ""}`)).json(); } catch { return; }
+  if (check) filesChecks = 3;  // the check runs in the background, so look again a few times
+  renderFiles();
+  if (filesDialog.open && (myFiles.busy || adding || filesChecks-- > 0)) filesTimer = setTimeout(refreshFiles, 1000);
+  else loadStatus();  // the count at the top
+}
+
+function renderFiles() {
+  const f = myFiles || { items: [] };
+  $("files-status").textContent = adding ? `Adding ${adding === 1 ? "a file" : `${adding} files`}…`
+    : f.busy && f.doing ? `Reading ${f.doing} (${f.done + 1} of ${f.total})… Big files take a minute or two.` : "";
+  const added = addedNames.length > 3 ? `${addedNames.slice(0, 3).join(", ")} and ${addedNames.length - 3} more` : addedNames.join(", ");
+  $("files-notes").innerHTML = (added ? `<p class="meta">Added ${esc(added)}.</p>` : "")
+    + fileNotes.map((n) => `<p class="${n.error ? "error" : "meta"}">${esc(n.text)}</p>`).join("");
+  $("files-ask").hidden = !fileAsks.length;
+  if (fileAsks.length) $("files-ask-text").textContent = `You already have a file called “${fileAsks[0].name}”. Replace it with this one?`;
+  $("files-folder").textContent = f.folder
+    ? `They're kept in ${f.folder}. Files you put in that folder, or change there, are picked up on their own.` : "";
+  const sig = JSON.stringify(f.items);
+  if (sig === filesSig) return;  // rebuilding the list would undo a half-confirmed Remove
+  filesSig = sig;
+  $("files-list").innerHTML = f.items.length ? f.items.map((it) => `<li>
+      <div class="f-main"><div class="f-title">${esc(it.title || it.name)}</div>
+        <div class="meta">${it.title && it.title !== it.name ? `${esc(it.name)} · ` : ""}${it.status === "ready" ? "Ready: the AI searches it" : "The AI can't search this one"}</div>
+        ${it.error ? `<div class="error">${esc(it.error)}</div>` : ""}</div>
+      <button class="ghost" type="button" data-name="${esc(it.name)}">Remove</button></li>`).join("")
+    : `<li class="empty meta">No files yet.</li>`;
+  for (const b of $("files-list").querySelectorAll("button[data-name]")) b.onclick = () => removeFile(b.dataset.name, b);
+}
+
+async function sendFile(file, how = "") {  // how: "" (ask if the name is taken), "&keep=1" or "&replace=<name>"
+  adding++;
+  renderFiles();
+  try {
+    const resp = await api(`/api/myfiles/add?name=${encodeURIComponent(file.name)}${how}`,
+      { method: "POST", body: file, headers: { "Content-Type": "application/octet-stream" } });
+    const out = await resp.json();
+    if (resp.status === 409) fileAsks.push({ file, name: out.name || file.name });
+    else if (!resp.ok) fileNotes.push({ error: true, text: `${file.name}: ${out.error || "couldn't add it."}` });
+    else if (out.duplicate || out.unchanged) fileNotes.push({ text: `${out.name} is already in your files.` });
+    else if (out.replaced) fileNotes.push({ text: `Replaced ${out.replaced} with the new version. The old one is in the ${trashName()}.` });
+    else addedNames.push(out.name);
+  } catch (err) {
+    if (!(err instanceof StaleTab)) fileNotes.push({ error: true, text: `${file.name}: couldn't add it. Is Survival LLM still running?` });
+  } finally {
+    adding--;
+    renderFiles();
+  }
+}
+
+async function addFiles(list, notes = []) {
+  const chosen = [...list];
+  if (!filesDialog.open) openFiles();
+  fileNotes.push(...notes);
+  const taken = new Set((myFiles?.items || []).map((it) => it.name));
+  for (const file of chosen) {
+    if (!readable(file.name)) fileNotes.push({ error: true, text: `${file.name}: ${CANT_READ}` });
+    else if (taken.has(file.name)) fileAsks.push({ file, name: file.name });
+    else await sendFile(file);
+  }
+  renderFiles();
+  refreshFiles(true);
+}
+
+async function answerAsk(how) {
+  const ask = fileAsks.shift();
+  renderFiles();
+  if (ask && how) await sendFile(ask.file, how === "replace" ? `&replace=${encodeURIComponent(ask.name)}` : "&keep=1");
+  refreshFiles(true);
+}
+
+async function removeFile(name, btn) {
+  if (!confirmClick(btn, `Click again to move it to the ${trashName()}`)) return;
+  try {
+    const resp = await api("/api/myfiles/remove", { method: "POST", body: JSON.stringify({ name }) });
+    fileNotes.push(resp.ok ? { text: `Removed ${name}. It's in the ${trashName()} if you want it back.` }
+      : { error: true, text: (await resp.json()).error });
+  } catch { /* a stale page shows its own banner */ }
+  refreshFiles(true);
+}
+
+$("files-btn").onclick = openFiles;
+$("close-files").onclick = () => filesDialog.close();
+filesDialog.onclick = (e) => { if (e.target === filesDialog) filesDialog.close(); };
+filesDialog.addEventListener("close", () => clearTimeout(filesTimer));
+$("choose-files").onclick = () => $("file-input").click();
+$("file-input").onchange = (e) => { addFiles(e.target.files); e.target.value = ""; };
+$("open-folder").onclick = () => api("/api/myfiles/open", { method: "POST", body: "{}" }).catch(() => {});
+$("ask-replace").onclick = () => answerAsk("replace");
+$("ask-keep").onclick = () => answerAsk("keep");
+$("ask-skip").onclick = () => answerAsk(null);
+
+// Files dropped anywhere on the window are added to Your files (instead of the window opening them).
+const dragsFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+let dragDepth = 0;
+function showDrop(on) {
+  $("drop-overlay").hidden = !on || filesDialog.open;
+  $("dropzone").classList.toggle("over", on && filesDialog.open);
+}
+document.addEventListener("dragenter", (e) => { if (dragsFiles(e)) { e.preventDefault(); dragDepth++; showDrop(true); } });
+document.addEventListener("dragover", (e) => { if (dragsFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } });
+document.addEventListener("dragleave", (e) => { if (dragsFiles(e) && --dragDepth <= 0) { dragDepth = 0; showDrop(false); } });
+document.addEventListener("drop", (e) => {
+  if (!dragsFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  showDrop(false);
+  const folders = new Set([...e.dataTransfer.items].map((i) => i.webkitGetAsEntry?.()).filter((en) => en?.isDirectory).map((en) => en.name));
+  addFiles([...e.dataTransfer.files].filter((f) => !folders.has(f.name)), [...folders].map((name) =>
+    ({ error: true, text: `${name} is a folder. To add a whole folder, click Open the folder and put it there.` })));
+});
+
+// ---------- updates ----------
+const updatesDialog = $("updates-dialog");
+let updateReport = null, updateChecking = false, updatesSig = "";
+const day = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { dateStyle: "medium" });
+const size = (gb) => (Number(gb) < 1 ? `${Math.round(Number(gb) * 1000)} MB` : `${Number(gb)} GB`);
+let updateError = "";
+
+function renderVersion() {
+  $("version-line").hidden = !state.version;
+  $("version-text").textContent = `Survival LLM ${state.version}`;
+  const app = state.update?.app;
+  $("updates-btn").textContent = app || state.update?.library ? "Update available" : "Check for updates";
+  $("update-banner").hidden = !app || recall("update-dismissed") === app;
+  if (app) $("update-banner").querySelector(".update-text").textContent = `Survival LLM ${app} is available.`;
+  if (updatesDialog.open) renderUpdates();
+}
+
+async function openUpdates(check) {
+  updatesSig = "";
+  if (!updatesDialog.open) updatesDialog.showModal();
+  updateChecking = true;
+  renderUpdates();
+  try { updateReport = await (await api(`/api/updates${check ? "?check=1" : ""}`)).json(); } catch { /* shown below */ }
+  updateChecking = false;
+  renderUpdates();
+  loadStatus();
+}
+
+function renderUpdates() {
+  const r = updateReport;
+  const busy = (job) => job && ["starting", "downloading", "unpacking"].includes(job.status);
+  let html;
+  if (updateChecking) html = `<p class="meta">Checking for updates…</p>`;
+  else if (!r) html = `<p class="error">Couldn't check for updates. Is Survival LLM still running?</p>`;
+  else {
+    html = r.failed ? `<p class="error">The last update couldn't be installed (${esc(r.failed)}). You still have version ${esc(r.version)}.</p>` : "";
+    const job = jobFor("app-update");
+    if (r.app) {
+      const a = r.app;
+      html += `<h3>Survival LLM ${esc(a.version)} is available</h3>
+        <p class="meta">You have ${esc(r.version)}.${a.date ? ` Released ${esc(day(a.date))}.` : ""} ${size(a.gb)} download.</p>`;
+      if (Array.isArray(a.notes) && a.notes.length) html += `<ul class="notes">${a.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>`;
+      if (busy(job)) html += progressHTML(job, `Downloading Survival LLM ${esc(a.version)}`, "Update download");
+      else if (job?.status === "done") html += `<p>Installed. Survival LLM is restarting into the new version…</p>`;
+      else if (a.blocker) html += `<p>${esc(a.blocker)}</p>
+        <p><a href="${esc(r.download_page)}" target="_blank" rel="noopener">Get the new version from the website</a></p>`;
+      else html += `${job?.status === "error" || updateError ? `<p class="error">${esc(updateError || job.error)}</p>` : ""}
+        <button class="primary" type="button" id="install-update">Update now</button>
+        <p class="meta">Survival LLM downloads the new version, closes, and opens again a few seconds later. Your AI models,
+          library, files and settings stay as they are.</p>`;
+    } else if (r.error) {
+      html += `<p>${r.error === "offline" ? "Couldn't check for updates (no internet?)." : "Couldn't check for updates right now."}
+        Survival LLM works fine without them. You have version ${esc(r.version)}.</p>`;
+    } else {
+      html += `<p>You have the latest version of Survival LLM (${esc(r.version)}).</p>`;
+    }
+    if (r.library) {
+      const lib = jobFor(`library:${r.library.id}`);
+      html += `<h3>A newer library is available</h3><p class="meta">${esc(r.library.label)}, from ${esc(day(r.library.version))}.</p>`;
+      if (busy(lib)) html += progressHTML(lib, "Downloading the new library", "Library update");
+      else if (lib?.status === "done") html += `<p>Your library is up to date.</p>`;
+      else html += `${lib?.status === "error" ? `<p class="error">${esc(lib.error)}</p>` : ""}
+        <button class="ghost" type="button" id="update-library">Update the library (${esc(size(r.library.gb))})</button>
+        <p class="meta">Your current library keeps working until the new one is ready, and your own files stay.</p>`;
+    }
+    if (r.checked) html += `<p class="meta">Last checked ${esc(new Date(r.checked * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }))}.</p>`;
+  }
+  if (html === updatesSig) return;  // rebuilding an unchanged window would knock keyboard focus off its buttons
+  updatesSig = html;
+  $("updates-body").innerHTML = html;
+  if ($("install-update")) $("install-update").onclick = installUpdate;
+  if ($("update-library")) $("update-library").onclick = () => startLibraryDownload(r.library.id);
+}
+
+async function installUpdate() {
+  updateError = "";
+  try {
+    const resp = await api("/api/update/app", { method: "POST", body: "{}" });
+    if (resp.ok) restarting = true;
+    else updateError = (await resp.json()).error || "The update couldn't start. Try again.";
+  } catch { return; }
+  renderUpdates();
+  loadStatus();
+}
+
+$("updates-btn").onclick = () => openUpdates(true);
+$("close-updates").onclick = () => updatesDialog.close();
+updatesDialog.onclick = (e) => { if (e.target === updatesDialog) updatesDialog.close(); };
+$("banner-update").onclick = () => openUpdates(false);
+$("banner-dismiss").onclick = () => { remember("update-dismissed", state?.update?.app || ""); $("update-banner").hidden = true; };
 
 // ---------- the AI's instructions, viewable and editable ----------
 let promptDefault = "";

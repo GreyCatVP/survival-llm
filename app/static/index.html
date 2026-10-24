@@ -16,6 +16,7 @@
       Model: <strong id="model-name">none yet</strong> <span aria-hidden="true">▾</span>
     </button>
     <button id="library-btn" class="ghost" type="button">Search library</button>
+    <button id="files-btn" class="ghost" type="button" title="Add your own documents for the AI to search">Your files</button>
     <button id="prompt-btn" class="ghost" type="button" title="See and edit the instructions the AI follows">Instructions</button>
     <button id="new-chat" class="ghost" type="button">New chat</button>
     <button id="quit" class="ghost" type="button" title="Stop Survival LLM">Quit</button>
@@ -24,12 +25,18 @@
 
 <main id="layout" class="layout">
   <section class="chat" aria-label="Chat">
+    <div id="update-banner" class="update-banner" hidden role="status">
+      <span class="update-text"></span>
+      <button id="banner-update" class="primary" type="button">See what's new</button>
+      <button id="banner-dismiss" class="ghost icon" type="button" aria-label="Not now">✕</button>
+    </div>
     <div id="messages" class="messages">
       <div id="setup" class="setup" hidden></div>
       <div id="welcome" class="welcome">
         <h1>Ask anything. No internet needed.</h1>
         <p>A local AI looks things up in an offline library of medical, emergency, how-to and encyclopedia
-          articles, then tells you where each answer came from. Click a source to read it yourself.</p>
+          articles, then tells you where each answer came from. Click a source to read it yourself. Add your own
+          documents with <strong>Your files</strong> at the top, and it searches those too.</p>
         <p class="using" id="using" hidden></p>
         <div class="examples">
           <button type="button" class="example">The power is out. How long is the food in my fridge safe?</button>
@@ -54,7 +61,8 @@
         </div>
         <button type="submit" id="send" aria-label="Send question">Send</button>
       </div>
-      <p class="footnote">AI can make mistakes. Check the sources.</p>
+      <p class="footnote">AI can make mistakes. Check the sources.<span id="version-line" hidden> · <span id="version-text"></span>
+        · <button id="updates-btn" class="link" type="button">Check for updates</button></span></p>
     </form>
   </section>
 
@@ -91,6 +99,41 @@
     <button id="prompt-save" class="primary" type="button">Save</button>
   </div>
 </dialog>
+<dialog id="files-dialog" class="dialog wide" aria-labelledby="files-title">
+  <div class="dialog-head">
+    <h2 id="files-title">Your files</h2>
+    <button id="close-files" class="ghost icon" type="button" aria-label="Close">✕</button>
+  </div>
+  <p class="meta">Add your own documents and the AI searches them along with the library: manuals for your generator or
+    medical devices, prescriptions, your family's emergency plan, notes. PDF, Word, EPUB, web pages and text files.
+    They stay on this computer.</p>
+  <div id="dropzone" class="dropzone">
+    <p>Drop files here, or</p>
+    <button id="choose-files" class="primary" type="button">Choose files</button>
+    <input id="file-input" type="file" multiple hidden accept=".pdf,.docx,.odt,.epub,.html,.htm,.txt,.md,.markdown,.csv">
+  </div>
+  <p id="files-status" class="meta" aria-live="polite"></p>
+  <div id="files-notes" aria-live="polite"></div>
+  <div id="files-ask" class="files-ask" hidden>
+    <p id="files-ask-text"></p>
+    <button id="ask-replace" class="primary" type="button">Replace it</button>
+    <button id="ask-keep" class="ghost" type="button">Keep both</button>
+    <button id="ask-skip" class="ghost" type="button">Don't add it</button>
+  </div>
+  <ul id="files-list" class="files-list"></ul>
+  <div class="files-foot">
+    <span id="files-folder" class="meta"></span>
+    <button id="open-folder" class="ghost" type="button">Open the folder</button>
+  </div>
+</dialog>
+<dialog id="updates-dialog" class="dialog" aria-labelledby="updates-title">
+  <div class="dialog-head">
+    <h2 id="updates-title">Updates</h2>
+    <button id="close-updates" class="ghost icon" type="button" aria-label="Close">✕</button>
+  </div>
+  <div id="updates-body" aria-live="polite"></div>
+</dialog>
+<div id="drop-overlay" class="drop-overlay" hidden>Drop to add to Your files</div>
 <div id="announce" class="sr-only" aria-live="polite"></div>
 <script src="/static/app.js"></script>
 </body>

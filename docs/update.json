@@ -1,0 +1,19 @@
+{
+ "version": "0.2.0",
+ "date": "2026-10-24",
+ "notes": [
+  "Your files: add your own PDFs, Word documents, ebooks, web pages and notes, and the AI searches them along with the library.",
+  "Check for updates, at the bottom of the window, installs new versions in one click.",
+  "The AI names its sources, and the app checks them against the articles it actually opened."
+ ],
+ "mac": {
+  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.2.0/Survival-LLM-mac.zip",
+  "bytes": 212761936,
+  "sha256": "dc66dae30711bd82b96a955f63e998da5ba43a6a4ca6c47bcd891c9acf250792"
+ },
+ "windows": {
+  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.2.0/Survival-LLM-windows.zip",
+  "bytes": 25171330,
+  "sha256": "0acf1d02e2a123e6c0c7ac73744a322a019d9112c7ff0153a4123ddfacc8a294"
+ }
+}

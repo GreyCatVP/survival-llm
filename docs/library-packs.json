@@ -5,6 +5,7 @@
    "label": "Essentials: medical, emergency, survival, how-to and repair (1.3 GB, 497,236 articles)",
    "gb": 1.3,
    "articles": 497236,
+   "version": "2026-10-24",
    "parts": [
     {
      "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.1.0/library-lite.zip.000",
@@ -18,6 +19,7 @@
    "label": "Everything: Essentials plus about 930,000 of Wikipedia's most-read articles and iFixit (8.8 GB, 1,509,998 articles)",
    "gb": 8.8,
    "articles": 1509998,
+   "version": "2026-10-24",
    "parts": [
     {
      "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.1.0/library-full.zip.000",

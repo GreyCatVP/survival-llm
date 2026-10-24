@@ -17,6 +17,7 @@ PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/
 OLLAMA_VERSION="v0.40.11"
 OLLAMA_URL="https://github.com/ollama/ollama/releases/download/$OLLAMA_VERSION"
 PYWEBVIEW="pywebview==6.2.1"
+PYPDF="pypdf==6.19.0"  # reads the PDFs people add to their own files (pure Python, same for Mac and Windows)
 
 mkdir -p "$CACHE" "$DIST"
 
@@ -29,10 +30,11 @@ fetch_python() {  # $1 = target triple
 copy_app() {  # $1 = destination folder for the app code
   mkdir -p "$1/library" "$1/app/static"
   cp "$REPO/core.py" "$1/"
-  cp "$REPO/library/search.py" "$1/library/"
+  cp "$REPO/library/search.py" "$REPO/library/passages.py" "$REPO/library/myfiles.py" "$1/library/"
   cp "$REPO/app/server.py" "$1/app/"
   cp "$REPO/app/static/"* "$1/app/static/"
   cp "$REPO/LICENSE" "$REPO/README.md" "$REPO/SOURCES.md" "$1/"
+  echo "$VERSION" > "$1/version.txt"  # the app compares it with the published update.json
 }
 
 fetch_ollama() {  # $1 = release file name; checked against Ollama's published checksums
@@ -50,7 +52,7 @@ RES="$APP/Contents/Resources"
 rm -rf "$DIST/mac"
 mkdir -p "$APP/Contents/MacOS" "$RES"
 tar -xzf "$(fetch_python aarch64-apple-darwin)" -C "$RES"
-"$RES/python/bin/python3" -m pip install -q --no-compile --disable-pip-version-check "$PYWEBVIEW"
+"$RES/python/bin/python3" -m pip install -q --no-compile --disable-pip-version-check "$PYWEBVIEW" "$PYPDF"
 rm -rf "$RES/python/lib/python3.12/site-packages/PyObjCTest"  # pyobjc's own test suite
 copy_app "$RES/app"
 clang -O2 -arch arm64 -mmacosx-version-min=14.0 "$HERE/launcher.c" -o "$APP/Contents/MacOS/Survival LLM" \
@@ -92,7 +94,7 @@ tar -xzf "$(fetch_python x86_64-pc-windows-msvc)" -C "$WIN"
 # as source, and it is plain Python, so the copy pip just made for the Mac is reused.
 "$RES/python/bin/python3" -m pip install -q --no-compile --disable-pip-version-check --target "$WIN/python/Lib/site-packages" \
   --platform win_amd64 --python-version 3.12 --implementation cp --only-binary=:all: --no-deps \
-  "$PYWEBVIEW" pythonnet==3.2.1 clr_loader==0.3.1 cffi==2.1.1 pycparser bottle typing_extensions
+  "$PYWEBVIEW" "$PYPDF" pythonnet==3.2.1 clr_loader==0.3.1 cffi==2.1.1 pycparser bottle typing_extensions
 cp -R "$RES/python/lib/python3.12/site-packages/proxy_tools" "$WIN/python/Lib/site-packages/"
 copy_app "$WIN/app"
 # Where the app fetches Ollama on first use (checked against Ollama's published checksum).
@@ -108,7 +110,7 @@ PY
 # pythonw runs without a console window; this .bat only starts it and closes.
 printf '%s\r\n' \
   '@echo off' \
-  'start "" "%~dp0python\pythonw.exe" "%~dp0app\app\server.py"' > "$WIN/Survival LLM.bat"
+  'start "" /D "%USERPROFILE%" "%~dp0python\pythonw.exe" "%~dp0app\app\server.py"' > "$WIN/Survival LLM.bat"
 (cd "$DIST/windows" && rm -f "$DIST/Survival-LLM-windows.zip" && zip -qr "$DIST/Survival-LLM-windows.zip" "Survival LLM")
 
 ls -lh "$DIST"/*.zip

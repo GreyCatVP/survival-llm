@@ -10,7 +10,7 @@ import re
 import urllib.error
 import urllib.request
 
-from library.search import TOPICS
+from library.search import STOPWORDS, TOPICS
 
 HOST = "http://" + os.environ.get("OLLAMA_HOST", "127.0.0.1:11434")
 MAX_TOOL_ROUNDS = 6
@@ -23,7 +23,7 @@ BASE_PROMPT = """You are an offline assistant running entirely on this computer,
 
 LIBRARY_PROMPT = """
 
-You have an offline library: search it with search_library and read results with read_article. It holds: {labels}. If the person asks to see a source or the full instructions, open it for them with show_article."""
+You have an offline library: search it with search_library and read results with read_article. It holds: {labels}.{personal} If the person asks to see a source or the full instructions, open it for them with show_article."""
 
 RULES = """
 
@@ -116,18 +116,24 @@ def system_prompt(library, tools=True):
     has_library = library is not None
     if has_library and tools:
         labels = ", ".join(library.labels()) if hasattr(library, "labels") else "reference articles"
-        return BASE_PROMPT + LIBRARY_PROMPT.format(labels=labels) + RULES.format(
+        personal = (' Results from "Your files" are documents the person added themselves, such as manuals for their '
+                    "own equipment, their medicines or their plans; when one is relevant, it beats general advice."
+                    if getattr(library, "has_personal", False) else "")
+        return BASE_PROMPT + LIBRARY_PROMPT.format(labels=labels, personal=personal) + RULES.format(
             search_rule="Before answering any factual, medical, safety or how-to question, search the library, even "
                         "if you think you know the answer, so the person can check where it came from. Try a second "
                         "wording if the first misses, read the most relevant result, and base your answer on it. If "
                         "nothing relevant turns up, still answer. "
                         "When sources disagree, trust Ready.gov, CDC, MedlinePlus, the UK medicines guide, WikEM and WikiMed over "
                         "wikiHow and Q&A sites.",
-            sources_rule="")  # the app adds the Sources line itself
+            sources_rule='\n- End with one short line, "Sources:", naming the articles you used. The app also shows the '
+                         "person every article you opened, so name only articles you actually read, and never make one "
+                         'up. If you answered from memory, write "Sources: none (from memory)".')
     if has_library:
         return BASE_PROMPT + RULES.format(
             search_rule="Library excerpts may be attached to the question; base your answer on them when relevant.",
-            sources_rule="")
+            sources_rule='\n- End with one short line, "Sources:", naming the excerpts you used, or "Sources: none (from '
+                         'memory)" if none of them helped. The person sees the excerpts too, so never name anything else.')
     return BASE_PROMPT + RULES.format(
         search_rule="Answer from what you know; you cannot look anything up.",
         sources_rule="\n- Do not cite sources you cannot check.")
@@ -185,7 +191,7 @@ def attach_excerpts(library, messages):
 
 
 TOOL_MARKUP = ("<tool_call", "<function")
-SOURCES_LINE = re.compile(r"^[*_# ]*Sources?[*_ ]*:.*$", re.IGNORECASE | re.MULTILINE)
+SOURCES_LINE = re.compile(r"^[*_# ]*Sources?(?:[*_ ]*:.*|[*_ ]*)$", re.IGNORECASE | re.MULTILINE)  # or a "Sources" heading
 LIST_ITEM = re.compile(r"\s*([-*•]|\d+[.)])\s")
 # Said before the last round, after the lookups run out. Without it some models (Granite) answer the last
 # round with yet another lookup written out as text, and the person gets no answer at all.
@@ -201,8 +207,9 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
     limit = LENGTH_LIMITS.get(length, LENGTH_LIMITS["normal"])
     options = {"num_ctx": 32768, "num_predict": limit * 2 if deep and limit > 0 else limit,
                **SAMPLING.get(family(model), {"temperature": 0.7})}
-    sources, seen, tokens, seconds, cut_off, looked = {}, {}, 0, 0.0, False, False
+    sources, seen, tokens, seconds, cut_off, looked, unopened, named = {}, {}, 0, 0.0, False, False, [], None
     earlier = any(m.get("role") == "tool" for m in messages)  # lookups from earlier questions in this chat
+    read_before = _read_earlier(messages)
     if library and not tools:
         for event in attach_excerpts(library, messages):
             sources.setdefault(event["id"], {k: event.get(k) for k in ("title", "source", "official")})
@@ -271,7 +278,8 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
     if answer.lstrip().startswith(TOOL_MARKUP):
         answer, unfinished = "", True  # a lookup written out as text, or cut off inside one: nothing to show
     elif library:
-        # Models cite sources they never opened (and from memory), so the app writes this line itself.
+        # The model names the sources it used, and the screen shows every article it opened. Models still name sources
+        # they never opened (evals/citation_check.py), so a Sources line that does is replaced by what it read.
         if read:
             line = "Sources: " + "; ".join(f"{s['title']} ({s['source']})" for s in read[:6])
         elif looked:
@@ -280,24 +288,146 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
             line = "Sources: what it read earlier in this chat"
         else:
             line = "Sources: none (from memory)"
-        answer = _with_sources_line(answer, line)
+        # Articles it only saw in search results count too: they exist, and it saw their excerpts.
+        shown = read_before + [{"id": k, **v} for k, v in seen.items()]
+        named = cited_sources(answer)
+        unopened = [n for n in named or [] if not _opened(n, read, shown, set(sources) | set(seen))]
+        if named is None or unopened:
+            answer = _with_sources_line(answer, line)
     yield {"type": "done", "tokens": tokens, "seconds": seconds, "answer": answer, "cut_off": cut_off,
-           "unfinished": unfinished,
+           "unfinished": unfinished, "unopened": unopened, "named": named if library and not unfinished else None,
            "sources": read, "seen": found[len(read):]}
 
 
-def _with_sources_line(answer, line):
-    """The answer with its last "Sources:" block (the line and any list right under it) replaced by line, or with
-    line added at the end when the model wrote none."""
+def _sources_block(answer):
+    """The answer's closing list of sources as (start, end, items), or None. That is the last "Sources" line or heading,
+    with any list right under it and at most a short remark after; a lone "Source:" line counts only as the very last
+    line, since one higher up may be part of the answer ("Source: rain barrel")."""
     found = list(SOURCES_LINE.finditer(answer))
     if not found:
-        return f"{answer.rstrip()}\n\n{line}"
-    rest = answer[found[-1].end():].split("\n")
-    i = 0
-    while i < len(rest) and (not rest[i].strip() or LIST_ITEM.match(rest[i])):
+        return None
+    line = found[-1]
+    plural = bool(re.match(r"^[*_# ]*Sources", line.group(0), re.IGNORECASE))
+    head = re.sub(r"^[*_# ]*Sources?[*_ ]*:?", "", line.group(0), flags=re.IGNORECASE)
+    items, end = [p.strip(" *_.") for p in _split_outside_brackets(head)], line.end()
+    if plural:
+        for row in answer[end:].split("\n")[1:]:
+            if LIST_ITEM.match(row):
+                items.append(row[LIST_ITEM.match(row).end():].strip(" *_."))
+            elif row.strip():
+                break
+            end = min(len(answer), end + 1 + len(row))
+    tail = answer[end:].strip()
+    if (tail and not plural) or len(tail) > 300:
+        return None
+    return line.start(), end, [item for item in items if item]
+
+
+def cited_sources(answer):
+    """What the answer's closing Sources line names, item by item; None if it has none."""
+    block = _sources_block(answer)
+    return block[2] if block else None
+
+
+def _split_outside_brackets(text, separators=(";", " | ")):
+    """Split text at the separators, but not inside parentheses or brackets."""
+    parts, depth, start, i = [], 0, 0, 0
+    while i < len(text):
+        depth += text[i] in "([" and 1 or text[i] in ")]" and -1 or 0
+        sep = next((x for x in separators if depth <= 0 and text.startswith(x, i)), None)
+        if sep:
+            parts.append(text[start:i])
+            start = i = i + len(sep)
+            continue
         i += 1
-    after = "\n".join(rest[i:]).strip()
-    return f"{answer[:found[-1].start()].rstrip()}\n\n{line}" + (f"\n\n{after}" if after else "")
+    return parts + [text[start:]]
+
+
+GENERIC = STOPWORDS | set("manual manuals guide guides guideline guidelines guidance article articles page pages "
+                          "section chapter book document entry entries website site library offline pdf via id "
+                          "information info recommendation recommendations".split())
+
+
+def _content_words(text):
+    return {w for w in re.findall(r"[a-z0-9]+", re.sub(r"\bid\s*\d+", " ", text.lower())) if w not in GENERIC}
+
+
+TRAILING_PARENS = re.compile(r"^(.*?)\s*\(((?:[^()]|\([^()]*\))*)\)\s*$")
+
+
+PUBLISHERS = re.compile(r"\b(mayo|webmd|healthline|cleveland clinic|johns hopkins|harvard|red cross|aap|fda|epa|osha|"
+                        r"noaa|usda|nhs|cdc|nih|fema|ready\.?gov|medlineplus|wikem|wikimed|wikipedia|wikihow|ifixit|"
+                        r"stack exchange|appropedia|energypedia|ifrc|your files)\b", re.IGNORECASE)
+
+
+def _claims_source(paren, articles):
+    """Whether words in parentheses name who published a source ("Mayo Clinic", "Ready.gov", a library collection)
+    rather than describe it ("FEMA's advice on bleach" is caught too; "Emergency Visual Signals" isn't)."""
+    words = _content_words(paren)
+    return bool(words) and (bool(PUBLISHERS.search(paren) or re.search(r"\bWHO\b", paren))
+                            or any(words <= _content_words(a["source"]) for a in articles))
+
+
+def _names_article(text, article, articles, full=None):
+    """Whether one named source is this article: (nearly) its whole title or a shortened form of it, or just its
+    collection's name. A publisher in parentheses at the end of the full item must be the article's own."""
+    title, source = _content_words(article["title"]), _content_words(article["source"])
+    found = TRAILING_PARENS.match(full or text)
+    if found and _claims_source(found.group(2), articles) and not _content_words(found.group(2)) <= title | source:
+        return False  # "Fever (Mayo Clinic)" when it read MedlinePlus
+    found = TRAILING_PARENS.match(text)
+    words = _content_words(found.group(1) if found else text)
+    if not words:
+        return bool(found)
+    allowed = 1 if len(title) > 2 else 0  # a short title fits inside many made-up ones ("Fever in Children")
+    if title and len(title & words) >= max(1, 0.8 * len(title)) and len(words - title - source) <= allowed:
+        return True
+    if title and len(words - source) >= 2 and words - source <= title:  # a shortened title
+        return True
+    return words <= source  # just the collection: fine if it read something from it
+
+
+def _opened(item, read, read_before=(), opened_ids=()):
+    """Whether a source the model named is one it opened: by passage id, by title or by its collection's name.
+    Models describe a source after a dash or colon; a list of several in one item must check out one by one."""
+    if re.match(r"none\b", item.strip(" *_\"'“”‘’").lower()):  # saying it used none is never a made-up source
+        return True
+    ids = [int(n) for n in re.findall(r"\b\d{5,}\b", item)]
+    if ids and all(i in opened_ids for i in ids):
+        return True
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", item)  # a Markdown link: its text, not its address
+    text = re.sub(r"https?://\S+", " ", text).strip(" *_.\"'“”‘’")
+    variants = [(text, text)]  # (what names the source, the text whose closing parentheses must fit)
+    variants += [(text.split(sep, 1)[0],) * 2 for sep in (" – ", " — ", " - ") if sep in text]  # after a dash: a description
+    if ": " in text:  # a colon may be part of the title, so the full item's parentheses still count
+        variants.append((text.split(": ", 1)[0], text))
+    articles = list(read) + list(read_before)
+    if any(_names_article(v.strip(" \"'“”‘’"), a, articles, full) for v, full in variants for a in articles):
+        return True
+    parts = [p for p in _split_outside_brackets(text, (", ", " and ", " & ")) if p.strip()]
+    return len(parts) > 1 and all(_opened(p, read, read_before, opened_ids) for p in parts)
+
+
+def _read_earlier(messages):
+    """Articles opened for earlier questions in this chat ({title, source}), from the tool results kept in it."""
+    found = []
+    for m in messages:
+        if m.get("role") == "tool" and m.get("tool_name") == "read_article":
+            first = (m.get("content") or "").split("\n", 1)[0]
+            parsed = re.match(r"^(.*) \(((?:[^()]|\([^()]*\))*)\)$", first)
+            if parsed:
+                found.append({"title": parsed.group(1), "source": parsed.group(2)})
+    return found
+
+
+def _with_sources_line(answer, line):
+    """The answer with its closing Sources block (the line and any list right under it) replaced by line, or with
+    line added at the end when it has none."""
+    block = _sources_block(answer)
+    if not block:
+        return f"{answer.rstrip()}\n\n{line}"
+    after = answer[block[1]:].strip()
+    return f"{answer[:block[0]].rstrip()}\n\n{line}" + (f"\n\n{after}" if after else "")
 
 
 def _one_per_article(items):
@@ -316,9 +446,10 @@ def trim(messages, budget=60000):
     for m in messages[1:-6]:
         if total <= budget:
             break
-        if m["role"] == "tool" and m["content"] != "[old result removed]":
+        if m["role"] == "tool" and not m["content"].endswith("[old result removed]"):
             total -= len(m["content"])
-            m["content"] = "[old result removed]"
+            title = m["content"].split("\n", 1)[0] if m.get("tool_name") == "read_article" else ""
+            m["content"] = f"{title}\n[old result removed]" if title else "[old result removed]"  # keeps what it read
 
 
 def installed_models():

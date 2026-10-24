@@ -8,6 +8,8 @@ and shows you the exact passage each answer came from.
 - **Offline and private.** The AI model and the library live on your computer. Your questions never leave it, and once set up it works with the internet off.
 - **Shows its sources.** Every answer lists the articles it read; click one to read it yourself, cited passage highlighted, with its license. Ask "where did you get that?" and it opens the source.
 - **Yours to adjust.** The Instructions button shows everything the AI is told before you ask anything; edit it and Save to change how it answers (Reset brings back the original). The Length limit next to Send sets how long an answer may run, or turns the limit off.
+- **Add your own files.** Your files, at the top, takes PDFs, Word documents, EPUB ebooks, web pages and text files (drop them on the window or choose them), so the AI can search your generator's manual, your medicines list or your family's emergency plan along with the library. They stay on your computer, in the `Survival LLM Files` folder in your home folder; files you put in that folder, or change there, are picked up on their own. It can't read scans or photos of pages yet.
+- **Updates itself.** Check for updates, at the bottom of the window, looks for a new version (it also looks once a day while it runs, by fetching one small file from the project's web page; nothing about you is sent). Update now downloads it, checks it, and restarts into it, keeping your models, library, files and settings. Newer libraries are offered there too.
 - **Built for emergencies.** About 1.5 million articles (500,000 in the smaller download): about 930,000 of Wikipedia's most-read articles, WikiMed, MedlinePlus, a UK medicines guide, WikEM, Ready.gov, CDC, U.S. military and FEMA survival and first-aid manuals, the USDA canning guide, risk references for estimating micromorts (life tables, U.S. death rates), wikiHow, iFixit, Appropedia, Energypedia and practical Q&A. See [SOURCES.md](SOURCES.md).
 
 ## Install
@@ -37,7 +39,8 @@ your computer and internet speed (the biggest AI model is 80 GB); you only click
 ## Uninstall
 
 Delete the app, then these folders: the AI models, in `~/.ollama/models` (shared with any other Ollama on the
-computer, so keep it if you use Ollama elsewhere), and the library, in `~/Survival LLM Library`. The app's own
+computer, so keep it if you use Ollama elsewhere), and the library, in `~/Survival LLM Library`. Your own files are in
+`~/Survival LLM Files`; keep that folder if you want them. The app's own
 settings are in `~/Library/Application Support/Survival LLM` on a Mac, and in `%APPDATA%\Survival LLM` plus the
 AI engine in `%LOCALAPPDATA%\Survival LLM` on Windows.
 
@@ -97,6 +100,13 @@ must" exceptions for running cars and generators near the house (the prompt now 
 Reproduce with `evals/retrieval_eval.py`, `evals/make_judging_batches.py` and `evals/score_judging.py`;
 answers are in `evals/results/`, grades in `evals/judging/`.
 
+**Made-up sources.** Each answer ends with the model's own "Sources:" line, and its instructions say the app shows
+every article it opened. Models name sources they never saw anyway. In a separate test of 14 questions
+(`evals/citation_check.py`, October 24 2026), these answers named a source the model had neither opened nor seen in
+its search results: Nemotron Super 6 (mostly answering from memory and naming Ready.gov or the CDC), Lightning 3,
+Gemma 3, Granite 2 and Qwen3.8 27B 1. So the app checks that line against what the model opened or saw, and replaces
+a line that names anything else with the list of articles it actually read.
+
 ## How it works
 
 ```
@@ -108,12 +118,13 @@ your question ─► local model (Ollama) ─► search_library ─► SQLite fu
 - `app/server.py` serves the chat page on `127.0.0.1` only and runs each turn through `core.py`.
 - `core.py` streams the model's answer and runs its three tools: `search_library`, `read_article`, `show_article`.
 - `library/search.py` searches `index.sqlite` (FTS5, BM25 ranking over ~1,500-character passages, official sources ranked higher) and reads the plain-text Markdown shards.
-- Everything except Ollama and the app window (pywebview) is the Python standard library.
+- `library/myfiles.py` reads the person's own files into a small index of their own (kept with the app's settings) and searches it together with the library.
+- Everything except Ollama, the app window (pywebview) and PDF reading (pypdf) is the Python standard library.
 
 ## Run from source
 
 ```bash
-python3 app/server.py          # the app in its own window (needs `pip install pywebview`; else it uses your browser)
+python3 app/server.py          # the app in its own window (needs `pip install pywebview pypdf`; else it uses your browser)
 python3 app/server.py --browser                     # in your web browser instead
 python3 chat.py "How long is fridge food safe in a blackout?"   # terminal; --model NAME picks a model
 ```
@@ -146,11 +157,18 @@ python3 packaging/make_packs.py --base-url https://github.com/OWNER/survival-llm
   lite=dist/library-lite full=dist/library-full   # parts for the release + library-packs.json for docs/
 ```
 
+Packs carry a date (`--version`, default today); installed copies offer a pack with a newer date as an update.
+
 ## Package the apps
 
 ```bash
 packaging/build.sh     # dist/Survival-LLM-mac.zip and dist/Survival-LLM-windows.zip (needs Xcode's command-line tools)
+gh release create "v$(cat packaging/VERSION)" dist/Survival-LLM-mac.zip dist/Survival-LLM-windows.zip
+python3 packaging/make_update.py "What's new" "..."   # writes docs/update.json; publish docs/ afterwards
 ```
+
+Set the version in `packaging/VERSION` first. Installed copies read `docs/update.json` from the project's web page,
+download the zip for their system, check its size and SHA-256, and replace themselves with it.
 
 The Mac app bundles a portable Python, pywebview for its window, and Ollama. The Windows app bundles Python and
 pywebview and downloads Ollama on first use (it is 1.6 GB with its graphics-card libraries).

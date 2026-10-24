@@ -176,6 +176,30 @@ textarea:focus { border-color: var(--accent); }
   width: min(680px, calc(100vw - 32px)); max-height: calc(100vh - 48px); padding: 18px 20px 20px; }
 .dialog::backdrop { background: rgba(0, 0, 0, .45); }
 .dialog.wide { width: min(900px, calc(100vw - 32px)); }
+.link { background: none; border: 0; padding: 0; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+.update-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 16px 0; padding: 8px 12px;
+  border: 1px solid var(--cite-line); background: var(--cite); border-radius: 12px; }
+.update-banner .update-text { flex: 1; min-width: 180px; }
+.dropzone { border: 2px dashed var(--line); border-radius: 12px; padding: 18px; text-align: center; margin: 14px 0 6px; }
+.dropzone p { margin: 0 0 10px; color: var(--muted); }
+.dropzone.over { border-color: var(--accent); background: var(--cite); }
+#files-notes p { margin: 4px 0; }
+.files-ask { border: 1px solid var(--cite-line); background: var(--cite); border-radius: 10px; padding: 10px 12px; margin: 8px 0; }
+.files-ask p { margin: 0 0 8px; }
+.files-ask button { margin: 0 6px 4px 0; }
+.files-list { list-style: none; padding: 0; margin: 8px 0 0; max-height: 42vh; overflow-y: auto; }
+.files-list li { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
+.files-list li.empty { border: 0; }
+.files-list .f-main { flex: 1; min-width: 0; }
+.files-list .f-title { font-weight: 600; overflow-wrap: anywhere; }
+.files-list .meta, .files-list .error { margin-top: 2px; font-size: 13px; overflow-wrap: anywhere; }
+.files-foot { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.files-foot .meta { flex: 1; margin: 0; overflow-wrap: anywhere; }
+.drop-overlay { position: fixed; inset: 12px; z-index: 50; display: grid; place-items: center; pointer-events: none;
+  border: 3px dashed var(--accent); border-radius: 16px; background: color-mix(in srgb, var(--bg) 85%, transparent);
+  color: var(--accent); font-size: 22px; font-weight: 600; }
+#updates-body h3 { margin: 14px 0 4px; font-size: 16px; }
+#updates-body .notes { margin: 8px 0; padding-left: 20px; }
 .prompt-text { width: 100%; box-sizing: border-box; min-height: 55vh; resize: vertical; padding: 12px;
   font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); background: var(--bg);
   border: 1px solid var(--line); border-radius: 10px; }

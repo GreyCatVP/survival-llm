@@ -5,7 +5,9 @@ Runs models with Ollama (https://ollama.com): the app's own copy (inside the Mac
 on Windows), or one the person installed. Everything else is the Python standard library.
 """
 import atexit
+import base64
 import ctypes
+import filecmp
 import hashlib
 import json
 import os
@@ -14,6 +16,7 @@ import re
 import secrets
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -21,6 +24,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import weakref
 import webbrowser
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from core import HOST, capabilities, chat_events, installed_models, system_prompt, trim  # noqa: E402
+from library import myfiles  # noqa: E402
 from library.search import DB_PATH, LIB, TOPICS, Library  # noqa: E402
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -90,6 +95,21 @@ else:
     APP_DIR = os.path.join(os.path.expanduser("~"), ".survival-llm")
 STATE = os.path.join(APP_DIR, "server.json")
 CUSTOM_PROMPT = os.path.join(APP_DIR, "instructions.txt")  # the person's own edit of the AI's instructions
+# The person's own files: a folder they can see, beside the library folder rather than in it (installing a library
+# pack replaces that folder), and its index, kept with the settings.
+MY_DIR = os.environ.get("SURVIVAL_LLM_FILES") or os.path.join(os.path.expanduser("~"), "Survival LLM Files")
+MY_DB = os.path.join(APP_DIR, "my-files.sqlite")
+MAX_UPLOAD = 4 * 1024 ** 3
+my_files_checked = [0.0]  # when the folder was last looked at
+
+# Updates. Each release publishes update.json on the project's web page (packaging/make_update.py writes it):
+# {"version", "date", "notes": [...], "mac": {"url", "bytes", "sha256"}, "windows": {...}}. The app checks it once a
+# day while running (a plain request for a small file, nothing about the person) and when they press Check.
+UPDATES_URL = os.environ.get("SURVIVAL_LLM_UPDATES") or "https://anonnerdfrenzy.github.io/survival-llm/update.json"
+DOWNLOAD_PAGE = "https://www.brangus.io/survival-llm"
+FIRST_PACKS = "2026-10-24"  # the library packs' version from before packs said which version they are
+UPDATE_FAILED = os.path.join(APP_DIR, "update-failed.txt")  # left by the Windows updater when it had to roll back
+updates = {"data": None, "checked": 0.0, "error": None}
 
 # The app's own Ollama. The Mac app carries it (Resources/ollama, next to the app code). On Windows it is 1.6 GB
 # with its graphics-card libraries, so it is downloaded on first use instead; build.sh writes engine.json with its
@@ -101,12 +121,28 @@ elif os.name == "nt":
 else:
     ENGINE = None
 ENGINE_INFO = os.path.join(ROOT, "engine.json")
+
+
+def _read_version():
+    """This copy's version: version.txt (written by packaging/build.sh), or packaging/VERSION when run from source."""
+    for path in (os.path.join(ROOT, "version.txt"), os.path.join(ROOT, "packaging", "VERSION")):
+        try:
+            with open(path) as f:
+                return f.read().strip()
+        except OSError:
+            pass
+    return "0"
+
+
+VERSION = _read_version()
 engine_procs = []   # Ollama processes this app started, stopped when it quits
 
 conversations = {}
 caps_cache = {}
 local = threading.local()
 lib_version = [0]   # bumped when a new library is installed, so threads reopen it
+lib_lock = threading.Lock()  # held while a new library is swapped in, so no thread opens the old one meanwhile
+open_libs = weakref.WeakSet()  # every open library, so a swap can close them (Windows won't move open files)
 downloads = {}      # key -> {key, label, status, completed, total, error}; runs in background threads
 dl_lock = threading.Lock()
 warming = {}        # model -> "loading" | "error"
@@ -114,6 +150,7 @@ manifest = {"packs": None, "failed_at": 0.0, "error": None}
 ollama_started_at = [0.0]
 quit_hooks = []     # run when someone presses Quit (closes the app window)
 quit_event = threading.Event()
+httpd = None        # the web server, once it is listening
 
 
 # ---------- helpers ----------
@@ -131,11 +168,90 @@ def running_instance():
 
 
 def library():
-    """One SQLite connection per server thread, reopened after a new library is installed."""
+    """The library plus the person's own files (None when there are neither). One set of SQLite connections per
+    server thread, reopened after a new library is installed or their files change."""
     if getattr(local, "version", None) != lib_version[0] or getattr(local, "lib", None) is None:
-        local.version = lib_version[0]
-        local.lib = Library() if os.path.exists(DB_PATH) else None
+        with lib_lock:
+            local.version = lib_version[0]
+            main = Library() if os.path.exists(DB_PATH) else None
+            if main:
+                open_libs.add(main)
+            mine = myfiles.MyFiles.open(MY_DB)
+            local.lib = myfiles.Combined(main, mine) if (main or mine) else None
     return local.lib
+
+
+def sync_my_files():
+    """Bring the index of their files up to date with the folder; if it changed, open chats see it from the next
+    question (the instructions list what the AI can search)."""
+    if not myfiles.sync(MY_DIR, MY_DB):
+        return
+    lib_version[0] += 1
+    for conv in list(conversations.values()):
+        if conv.get("messages") and conv.get("model"):
+            conv["messages"][0]["content"] = prompt_for(model_caps(conv["model"]))
+
+
+def check_my_files():
+    my_files_checked[0] = time.monotonic()
+    threading.Thread(target=sync_my_files, daemon=True).start()
+
+
+def safe_name(name):
+    """A file name that is safe to save on Mac and Windows: no folders, no reserved characters or names."""
+    name = re.sub(r'[\x00-\x1f<>:"/\\|?*]', "_", name.replace("\\", "/").rsplit("/", 1)[-1]).strip(" .")
+    stem, ext = os.path.splitext(name)
+    ext = ext[:12]
+    if re.fullmatch(r"(?i)(con|prn|aux|nul|com\d|lpt\d)", stem.split(".")[0].strip(" .")):  # "con.notes.txt" too
+        stem = "_" + stem
+    while len((stem + ext).encode("utf-8")) > 200:  # disks allow 255 bytes; leave room for " (2)"
+        stem = stem[:-1]
+    return stem.rstrip(" .") + ext if stem.strip(" .") else ""
+
+
+def my_file_path(name):
+    """The full path of one of their files, from its name in the list; None if it would point outside the folder."""
+    path = os.path.realpath(os.path.join(MY_DIR, *str(name).split("/")))
+    folder = os.path.realpath(MY_DIR)
+    return path if path.startswith(folder + os.sep) and os.path.isfile(path) else None
+
+
+def my_name(path):
+    """A file's name in the list: its path inside their folder."""
+    return os.path.relpath(os.path.realpath(path), os.path.realpath(MY_DIR)).replace(os.sep, "/")
+
+
+def to_trash(path):
+    """Move a file to the Trash (Mac) or Recycle Bin (Windows), so removing one of their files can be undone."""
+    if sys.platform == "darwin":
+        try:
+            from Foundation import NSURL, NSFileManager  # part of pywebview's macOS dependencies
+        except ImportError:  # run from source without pywebview: ask Finder (macOS asks permission the first time)
+            subprocess.run(["osascript", "-e", "on run argv", "-e",
+                            'tell application "Finder" to delete (POSIX file (item 1 of argv) as alias)', "-e", "end run",
+                            path], check=True, capture_output=True, timeout=60)
+            return
+        ok, _, err = NSFileManager.defaultManager().trashItemAtURL_resultingItemURL_error_(
+            NSURL.fileURLWithPath_(path), None, None)
+        if not ok:
+            raise OSError(str(err))
+    elif os.name == "nt":
+        script = ("Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile("
+                  "$env:SURVIVAL_LLM_TRASH, 'AllDialogs', 'SendToRecycleBin')")  # asks before deleting for good
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True, timeout=60,
+                       env={**os.environ, "SURVIVAL_LLM_TRASH": path}, creationflags=0x08000000)  # no console window
+    else:
+        os.remove(path)
+
+
+def open_folder(path):
+    os.makedirs(path, exist_ok=True)
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    elif os.name == "nt":
+        os.startfile(path)
+    else:
+        subprocess.Popen(["xdg-open", path])
 
 
 def ram_gb():
@@ -202,10 +318,11 @@ def library_packs():
     """Packs from the published manifest; empty when offline or unpublished (checked again after a minute)."""
     if manifest["packs"] is None and time.time() - manifest["failed_at"] > 60:
         try:
-            with urllib.request.urlopen(MANIFEST_URL, timeout=6) as resp:
-                manifest["packs"] = json.load(resp).get("packs", [])
-            manifest["error"] = None
-        except (urllib.error.HTTPError, ValueError):  # the site answered, but without a usable list
+            packs = fetch_json(MANIFEST_URL).get("packs", [])
+            if not valid_packs(packs):
+                raise ValueError("library-packs.json")
+            manifest.update(packs=packs, error=None)
+        except (urllib.error.HTTPError, ValueError, AttributeError):  # the site answered, but without a usable list
             manifest.update(failed_at=time.time(), error="unavailable")
         except OSError:
             manifest.update(failed_at=time.time(), error="offline")
@@ -429,13 +546,31 @@ def library_worker(key, pack_id):
     shutil.rmtree(partial, ignore_errors=True)
     with zipfile.ZipFile(zip_path) as z:
         z.extractall(partial)
-    if os.path.islink(LIB):
-        os.remove(LIB)
-    elif os.path.isdir(LIB):
-        shutil.rmtree(LIB)
-    os.replace(partial, LIB)
+    with open(os.path.join(partial, "pack.json"), "w") as f:  # which pack this is, for update checks
+        json.dump({"id": pack_id, "version": pack.get("version", FIRST_PACKS)}, f)
+    old = LIB + ".old"
+    shutil.rmtree(old, ignore_errors=True)
+    with lib_lock:  # close every open copy first: Windows won't rename a folder with open files in it
+        lib_version[0] += 1
+        for lib in list(open_libs):
+            try:
+                lib.db.close()
+            except Exception:
+                pass
+        try:
+            if os.path.islink(LIB):
+                os.remove(LIB)
+            elif os.path.isdir(LIB):
+                os.rename(LIB, old)  # the old library stays whole until the new one is in place
+            os.replace(partial, LIB)
+        except OSError:
+            if os.path.isdir(old) and not os.path.exists(LIB):
+                os.rename(old, LIB)
+            raise RuntimeError("Couldn't swap in the new library. Close any window showing the library folder, "
+                               "then try again.") from None
+        lib_version[0] += 1
+    shutil.rmtree(old, ignore_errors=True)
     shutil.rmtree(work, ignore_errors=True)
-    lib_version[0] += 1
 
 
 def warm_model(model):
@@ -456,6 +591,307 @@ def warm_model(model):
 
 
 # ---------- HTTP ----------
+
+# ---------- updates: the library pack, and the app itself (it replaces itself, then restarts) ----------
+
+def version_tuple(version):
+    return tuple(int(n) for n in re.findall(r"\d+", version or "0"))
+
+
+def valid_update(data):
+    """Whether update.json has the shape the app relies on (a broken file must not break running copies)."""
+    if not isinstance(data, dict) or not isinstance(data.get("version"), str) \
+            or not re.fullmatch(r"\d+(\.\d+){0,3}", data["version"]):
+        return False
+    for key in ("mac", "windows"):
+        pkg = data.get(key)
+        if pkg is not None and not (isinstance(pkg, dict) and isinstance(pkg.get("bytes"), int)
+                                    and re.fullmatch(r"(https://|http://127\.0\.0\.1:)\S+", str(pkg.get("url", "")))
+                                    and re.fullmatch(r"[0-9a-f]{64}", str(pkg.get("sha256", "")))):
+            return False
+    notes = data.get("notes", [])
+    return isinstance(notes, list) and all(isinstance(n, str) for n in notes) and isinstance(data.get("date", ""), str)
+
+
+def valid_packs(packs):
+    return isinstance(packs, list) and all(
+        isinstance(p, dict) and isinstance(p.get("id"), str) and isinstance(p.get("label"), str)
+        and isinstance(p.get("gb"), (int, float)) and isinstance(p.get("version", ""), str)
+        and isinstance(p.get("parts"), list) and all(isinstance(x, dict) and isinstance(x.get("bytes"), int)
+                                                     and isinstance(x.get("url"), str) for x in p["parts"])
+        for p in packs)
+
+
+def fetch_json(url):
+    with urllib.request.urlopen(url, timeout=8) as resp:
+        return json.load(resp)
+
+
+def check_updates(force=False):
+    """Fetch what's published: the latest app version and the library packs (at most every 6 hours unless forced)."""
+    if not force and time.time() - updates["checked"] < 6 * 3600:
+        return
+    try:
+        data = fetch_json(UPDATES_URL)
+        if not valid_update(data):
+            raise ValueError("update.json")
+        updates.update(data=data, error=None)
+        packs = fetch_json(MANIFEST_URL)
+        if isinstance(packs, dict) and valid_packs(packs.get("packs")):
+            manifest.update(packs=packs["packs"], error=None)
+    except urllib.error.HTTPError:  # the site answered, but without the file
+        updates["error"] = "unavailable"
+    except OSError:
+        updates["error"] = "offline"
+    except Exception:  # a file that isn't what the app expects
+        updates["error"] = "unavailable"
+    updates["checked"] = time.time()
+
+
+def auto_check_updates():
+    delay = 20  # a little after starting, then once a day
+    while not quit_event.wait(delay):
+        try:
+            check_updates(force=True)
+        except Exception:
+            pass
+        delay = 24 * 3600
+
+
+def installed_pack():
+    """The library pack that is installed ({"id", "version"}), or None: no library, or one built by hand."""
+    try:
+        with open(os.path.join(LIB, "pack.json")) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        pass
+    if not os.path.exists(DB_PATH) or os.path.islink(LIB):
+        return None
+    try:
+        db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        keys = {k for (k,) in db.execute("SELECT key FROM sources")}
+        db.close()
+    except sqlite3.Error:
+        return None
+    if keys & {"post-disaster", "water", "food-prep", "medical-library", "knots"}:  # sources no pack has
+        return None
+    return {"id": "full" if "wikipedia" in keys else "lite", "version": FIRST_PACKS}  # from before pack.json
+
+
+def platform_key():
+    return "mac" if sys.platform == "darwin" else "windows" if os.name == "nt" else None
+
+
+def newer_app():
+    """The published version if it is newer than this one and has a download for this computer, else None."""
+    data = updates["data"] or {}
+    if data.get(platform_key()) and version_tuple(data.get("version")) > version_tuple(VERSION):
+        return data
+    return None
+
+
+def newer_library():
+    pack = installed_pack()
+    offer = next((p for p in manifest["packs"] or [] if pack and p["id"] == pack.get("id")), None)
+    if offer and offer.get("version", FIRST_PACKS) > str(pack.get("version", FIRST_PACKS)):  # ISO dates sort as text
+        return {k: offer.get(k) for k in ("id", "label", "gb", "version")}
+    return None
+
+
+def original_path(path):
+    """macOS runs a downloaded app that was never moved from a temporary, read-only copy (App Translocation).
+    The path of the real one, from the system's Security framework; None if it can't say."""
+    if "/AppTranslocation/" not in path:
+        return path
+    try:
+        cf = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        sec = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Security.framework/Security")
+        cf.CFURLCreateFromFileSystemRepresentation.restype = ctypes.c_void_p
+        cf.CFURLCreateFromFileSystemRepresentation.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long,
+                                                               ctypes.c_bool]
+        cf.CFURLGetFileSystemRepresentation.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_char_p, ctypes.c_long]
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+        sec.SecTranslocateCreateOriginalPathForURL.restype = ctypes.c_void_p
+        sec.SecTranslocateCreateOriginalPathForURL.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        raw = path.encode()
+        url = cf.CFURLCreateFromFileSystemRepresentation(None, raw, len(raw), True)
+        real = sec.SecTranslocateCreateOriginalPathForURL(url, None)
+        cf.CFRelease(url)
+        if not real:
+            return None
+        buf = ctypes.create_string_buffer(4096)
+        ok = cf.CFURLGetFileSystemRepresentation(real, True, buf, len(buf))
+        cf.CFRelease(real)
+        return buf.value.decode() if ok else None
+    except Exception:
+        return None
+
+
+def install_location():
+    """Where this copy of the app lives when it came from a download: the Mac app, or the Windows folder."""
+    if sys.platform == "darwin" and ROOT.endswith(os.path.join("Contents", "Resources", "app")):
+        return original_path(os.path.dirname(os.path.dirname(os.path.dirname(ROOT))))
+    if os.name == "nt" and os.path.isfile(os.path.join(os.path.dirname(ROOT), "Survival LLM.bat")):
+        return os.path.dirname(ROOT)
+    return None
+
+
+def writable(folder):
+    if os.name != "nt":
+        return os.access(folder, os.W_OK)
+    try:  # Windows folder permissions only show when you try
+        probe = os.path.join(folder, f".survival-llm-{uuid.uuid4().hex[:8]}")
+        open(probe, "w").close()
+        os.remove(probe)
+        return True
+    except OSError:
+        return False
+
+
+def update_blocker():
+    """Why this copy can't update itself, as a sentence for the person; None if it can."""
+    where = install_location()
+    if where is None:
+        if "/AppTranslocation/" in ROOT:
+            return ("macOS is running Survival LLM from a temporary copy. Move it to your Applications folder (drag it "
+                    "there in Finder), open it from there, and check again.")
+        return "This copy of Survival LLM runs from its source code, so it can't update itself. Update it with git pull."
+    if not writable(os.path.dirname(where)):
+        return "Survival LLM can't replace itself in the folder it's in. Download the new version from the website."
+    return None
+
+
+def update_report():
+    """Everything the Updates window shows."""
+    app, lib = newer_app(), newer_library()
+    report = {"version": VERSION, "checked": updates["checked"] or None, "error": updates["error"],
+              "download_page": DOWNLOAD_PAGE, "app": None, "library": lib}
+    if app:
+        report["app"] = {"version": app["version"], "date": app.get("date"), "notes": app.get("notes", []),
+                         "gb": round(app[platform_key()]["bytes"] / 1e9, 2), "blocker": update_blocker()}
+    try:
+        with open(UPDATE_FAILED, encoding="utf-8-sig") as f:
+            report["failed"] = f.read().strip() or "no reason given"
+        os.remove(UPDATE_FAILED)  # shown once
+    except OSError:
+        pass
+    return report
+
+
+def app_update_worker(key):
+    """Download the new version, check it, put it in place of this copy, then restart into it."""
+    app, blocker = newer_app(), update_blocker()
+    if blocker or not app:
+        raise RuntimeError(blocker or "There's no newer version to install.")
+    pkg = app[platform_key()]
+    if pkg["bytes"] * 3 / 1e9 + 1 > disk_free_gb():
+        raise RuntimeError("Not enough free disk space for the update.")
+    work = os.path.join(APP_DIR, "update")
+    os.makedirs(work, exist_ok=True)
+    zip_path = os.path.join(work, f"Survival-LLM-{re.sub(r'[^0-9.]', '', app['version'])}-{platform_key()}.zip")
+    for name in os.listdir(work):  # a download of an older version
+        if os.path.join(work, name) != zip_path:
+            os.remove(os.path.join(work, name))
+    _download(key, pkg["url"], zip_path, pkg["bytes"])
+    if os.path.getsize(zip_path) != pkg["bytes"] or _sha256(zip_path) != pkg["sha256"]:
+        os.remove(zip_path)
+        raise RuntimeError("The update was damaged in transit. Try again.")
+    _update(key, status="unpacking", completed=pkg["bytes"], total=pkg["bytes"])
+    where = install_location()
+    helper = install_mac(zip_path, where) if sys.platform == "darwin" else install_windows(zip_path, where)
+    os.remove(zip_path)
+    threading.Timer(1.5, restart_into, args=(helper,)).start()  # time for the window to say "Restarting"
+
+
+def install_mac(zip_path, bundle):
+    """Unpack the new app beside this one, check its signature, and swap them (the old one goes to the Trash).
+    A running app's files can be replaced on macOS; the new one starts once this one has quit."""
+    if sys.platform == "darwin":
+        from Foundation import NSURL, NSFileManager  # noqa: F401  load before the swap: to_trash needs it after
+    parent = os.path.dirname(bundle)
+    staging = os.path.join(parent, f".Survival LLM update {uuid.uuid4().hex[:8]}")
+    try:
+        subprocess.run(["ditto", "-x", "-k", zip_path, staging], check=True, capture_output=True, timeout=900)
+        new = os.path.join(staging, "Survival LLM.app")
+        if subprocess.run(["codesign", "--verify", "--deep", new], capture_output=True, timeout=600).returncode:
+            raise RuntimeError("The update didn't pass macOS's signature check, so it wasn't installed.")
+        old = os.path.join(staging, "Survival LLM (old version).app")
+        os.rename(bundle, old)
+        try:
+            os.rename(new, bundle)
+        except OSError:
+            os.rename(old, bundle)
+            raise
+        try:
+            to_trash(old)  # can be put back from the Trash
+        except Exception:
+            shutil.rmtree(old, ignore_errors=True)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    wait = ('n=0; while kill -0 "$1" 2>/dev/null; do n=$((n+1)); [ $n -gt 300 ] && kill -9 "$1"; sleep 0.2; done; '
+            'sleep 0.5; open "$2"')  # a minute at most, then it stops the old copy
+    return {"cmd": ["/bin/sh", "-c", wait, "survival-llm-update", str(os.getpid()), bundle]}
+
+
+WINDOWS_SWAP = """# Run by a copy of Survival LLM that is updating itself on Windows: wait for it to quit, swap in the new folder
+# (retrying for a minute, since something may still be using a file in it), put the old one back if that fails
+# and leave a note saying why, and in every case start whichever version is in place.
+$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath $env:TEMP
+Wait-Process -Id ([int]$env:SLLM_PID) -Timeout 120 -ErrorAction SilentlyContinue
+$dir = $env:SLLM_DIR
+try {
+  if (Test-Path -LiteralPath $env:SLLM_OLD) { Remove-Item -LiteralPath $env:SLLM_OLD -Recurse -Force }
+  $moved = $false
+  for ($i = 0; $i -lt 30 -and -not $moved; $i++) {
+    try { Move-Item -LiteralPath $dir -Destination $env:SLLM_OLD; $moved = $true } catch { Start-Sleep -Seconds 2 }
+  }
+  if (-not $moved) { throw "Something is still using a file in the Survival LLM folder." }
+  try { Move-Item -LiteralPath $env:SLLM_NEW -Destination $dir }
+  catch { Move-Item -LiteralPath $env:SLLM_OLD -Destination $dir; throw }
+  Remove-Item -LiteralPath $env:SLLM_OLD -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $env:SLLM_STAGING -Recurse -Force -ErrorAction SilentlyContinue
+} catch {
+  try { Set-Content -LiteralPath $env:SLLM_FAILED -Value $_.Exception.Message -Encoding UTF8 } catch {}
+} finally {
+  Start-Process -FilePath (Join-Path $dir 'python\\pythonw.exe') -WorkingDirectory $env:USERPROFILE `
+    -ArgumentList ('"' + (Join-Path $dir 'app\\app\\server.py') + '"')
+}"""
+
+
+def install_windows(zip_path, folder):
+    """Unpack the new version beside this one. Windows won't replace a running program's files, so a helper swaps
+    the folders once this copy has quit, puts the old one back if that fails, and starts the app again."""
+    staging = folder + ".update"
+    shutil.rmtree(staging, ignore_errors=True)
+    with zipfile.ZipFile(zip_path) as z:
+        z.extractall(staging)
+    new = os.path.join(staging, "Survival LLM")
+    if not os.path.isfile(os.path.join(new, "python", "pythonw.exe")):
+        shutil.rmtree(staging, ignore_errors=True)
+        raise RuntimeError("The update didn't contain the app, so it wasn't installed.")
+    script = base64.b64encode(WINDOWS_SWAP.encode("utf-16-le")).decode()
+    return {"cmd": ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", script],
+            "env": {**os.environ, "SLLM_PID": str(os.getpid()), "SLLM_DIR": folder, "SLLM_NEW": new,
+                    "SLLM_OLD": folder + ".old", "SLLM_STAGING": staging, "SLLM_FAILED": UPDATE_FAILED}}
+
+
+def restart_into(helper):
+    """Start the helper that opens the new version once this copy has quit, then quit."""
+    flags = {"creationflags": 0x08000000 | 0x00000200} if os.name == "nt" else {"start_new_session": True}
+    subprocess.Popen(helper["cmd"], env=helper.get("env"), cwd=os.path.expanduser("~"), stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **flags)
+    quit_app()
+
+
+def quit_app():
+    """Stop serving and close the window; the app then exits, stopping the AI engine it started."""
+    if httpd:
+        threading.Thread(target=httpd.shutdown, daemon=True).start()
+    quit_event.set()
+    for hook in quit_hooks:
+        threading.Thread(target=hook, daemon=True).start()
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -525,6 +961,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200 if doc else 404, doc or {"error": "not found"})
         if url.path == "/api/prompt":
             return self._send(200, {"default": system_prompt(library(), True), "custom": custom_prompt()})
+        if url.path == "/api/myfiles":  # their files, and whether any are being read (?check=1: look for changes)
+            if query.get("check"):
+                check_my_files()
+            return self._send(200, {"folder": MY_DIR, "items": myfiles.items(MY_DB), **myfiles.progress})
+        if url.path == "/api/updates":  # ?check=1: look now instead of using the last check
+            check_updates(force=bool(query.get("check")))
+            return self._send(200, update_report())
         if url.path == "/api/search":
             if not library():
                 return self._send(200, {"results": []})
@@ -532,6 +975,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     def _status(self):
+        if time.monotonic() - my_files_checked[0] > 30:  # picks up files changed or added in the folder itself
+            check_my_files()
         models = installed_models()
         if models is None:
             start_ollama()
@@ -539,6 +984,7 @@ class Handler(BaseHTTPRequestHandler):
         info = engine_info()
         lib = library()
         docs, sources = lib.stats() if lib else (0, 0)
+        mine = lib.mine.stats()[0] if lib and lib.mine else 0
         chat_models = [m.removesuffix(":latest") for m in models or [] if not any(x in m for x in NOT_CHAT)]
         catalog = machine_catalog(chat_models)
         best = next((c["model"] for c in catalog if c["installed"] and c["fits"]), None)
@@ -557,6 +1003,9 @@ class Handler(BaseHTTPRequestHandler):
             "packs": [] if docs else [{k: p[k] for k in ("id", "label", "gb")} for p in library_packs()],
             "packs_error": None if docs else manifest["error"],
             "library_dir": LIB, "disk_free_gb": disk_free_gb(),
+            "my_files": {"ready": mine, "busy": myfiles.progress["busy"]},
+            "version": VERSION,
+            "update": {"app": (newer_app() or {}).get("version"), "library": bool(newer_library())},
             "machine": {"os": "macOS" if sys.platform == "darwin" else platform.system(), "ram_gb": ram_gb()},
             "topics": TOPICS}
 
@@ -564,6 +1013,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed():
             return self._send(403, {"error": "forbidden"})
         url = urlparse(self.path)
+        if url.path == "/api/myfiles/add":  # the body is the file itself
+            return self._add_file(url)
         body = self._body()
         model = str(body.get("model") or "")
         if model and not re.fullmatch(r"[\w.:/-]{1,120}", model):
@@ -580,7 +1031,21 @@ class Handler(BaseHTTPRequestHandler):
                 if conv.get("messages"):
                     conv["messages"][0]["content"] = prompt_for(model_caps(conv["model"]))
             return self._send(200, {"ok": True, "custom": custom_prompt()})
+        if url.path == "/api/myfiles/remove":
+            path = my_file_path(body.get("name", ""))
+            if not path:
+                return self._send(404, {"error": "That file isn't in the folder any more."})
+            try:
+                to_trash(path)
+            except Exception:
+                return self._send(500, {"error": "Couldn't move it to the " + ("Recycle Bin." if os.name == "nt" else "Trash.")})
+            check_my_files()
+            return self._send(200, {"ok": True})
+        if url.path == "/api/myfiles/open":
+            open_folder(MY_DIR)
+            return self._send(200, {"ok": True})
         if url.path == "/api/new":
+            check_my_files()  # picks up files put straight into the folder
             conversations.pop(body.get("conversation"), None)
             return self._send(200, {"conversation": uuid.uuid4().hex})
         if url.path == "/api/chat":
@@ -603,14 +1068,86 @@ class Handler(BaseHTTPRequestHandler):
             ollama_started_at[0] = 0
             start_ollama()
             return self._send(200, {"ok": True})
+        if url.path == "/api/update/app":
+            app = newer_app()
+            with dl_lock:
+                busy = [j["label"] for j in downloads.values()
+                        if j["status"] in ("starting", "downloading", "unpacking") and j["key"] != "app-update"]
+            if busy:  # updating restarts the app, which would cut it short
+                return self._send(409, {"error": f"Wait until {busy[0]} has finished, then update."})
+            started = bool(app) and start_job("app-update", f"Survival LLM {app['version']}", app_update_worker)
+            return self._send(200 if started else 409, {"ok": started})
         if url.path == "/api/quit":
             self._send(200, {"ok": True})
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
-            quit_event.set()
-            for hook in quit_hooks:
-                threading.Thread(target=hook, daemon=True).start()
+            quit_app()
             return None
         return self._send(404, {"error": "not found"})
+
+    def _add_file(self, url):
+        try:
+            return self._save_file(url)
+        except ConnectionError:  # the page went away mid-upload
+            return None
+        except OSError as exc:
+            return self._send(500, {"error": f"Couldn't save this file ({exc.strerror or exc})."})
+
+    def _save_file(self, url):
+        """Save an uploaded file into their folder. ?replace=<name> makes it the new version of that file (the old one
+        goes to the Trash); ?keep=1 keeps both when a different file already has this name ("name (2)"); with
+        neither, that case answers 409 so the app can ask which they want."""
+        self.close_connection = True  # a refused upload leaves its body unread
+        query = parse_qs(url.query)
+        name = safe_name(query.get("name", [""])[0])
+        old = my_file_path(query["replace"][0]) if query.get("replace") else None
+        if query.get("replace") and not old:
+            return self._send(404, {"error": "The file you're updating isn't in the folder any more. Add this one instead."})
+        size = int(self.headers.get("Content-Length") or 0)
+        if os.path.splitext(name)[1].lower() not in myfiles.KINDS:
+            return self._send(400, {"error": myfiles.CANT_READ})
+        if size > MAX_UPLOAD:
+            return self._send(413, {"error": "This file is too big (over 4 GB)."})
+        if size + 1e9 > shutil.disk_usage(os.path.dirname(MY_DIR) if os.path.isdir(os.path.dirname(MY_DIR))
+                                          else os.path.expanduser("~")).free:
+            return self._send(507, {"error": "There isn't enough free disk space for this file."})
+        os.makedirs(MY_DIR, exist_ok=True)
+        part = os.path.join(MY_DIR, f".{uuid.uuid4().hex}.part")
+        try:
+            with open(part, "wb") as f:
+                left = size
+                while left:
+                    chunk = self.rfile.read(min(left, 1 << 20))
+                    if not chunk:
+                        raise ConnectionError("upload cut short")
+                    f.write(chunk)
+                    left -= len(chunk)
+            dest = os.path.join(MY_DIR, name)
+            if old and os.path.getsize(old) == size and filecmp.cmp(old, part, shallow=False):
+                return self._send(200, {"ok": True, "name": my_name(old), "unchanged": True})
+            if os.path.exists(dest) and os.path.realpath(dest) != old:
+                if os.path.getsize(dest) == size and filecmp.cmp(dest, part, shallow=False):
+                    return self._send(200, {"ok": True, "name": name, "duplicate": True})  # the same file again
+                if not old and query.get("keep", [""])[0] != "1":
+                    return self._send(409, {"error": f"You already have a file called {name}.", "name": name})
+                stem, ext = os.path.splitext(name)
+                n = 2
+                while os.path.exists(dest):
+                    dest = os.path.join(MY_DIR, f"{stem} ({n}){ext}")
+                    n += 1
+            if old:
+                try:
+                    to_trash(old)
+                except Exception:
+                    return self._send(500, {"error": "Couldn't move the old version to the "
+                                                     + ("Recycle Bin." if os.name == "nt" else "Trash.")})
+            os.replace(part, dest)
+        finally:
+            if os.path.exists(part):
+                os.remove(part)
+        check_my_files()
+        reply = {"ok": True, "name": my_name(dest)}
+        if old:
+            reply["replaced"] = my_name(old)
+        return self._send(200, reply)
 
     def _chat(self, body):
         model, question = body.get("model"), (body.get("message") or "").strip()
@@ -707,6 +1244,7 @@ if __name__ == "__main__":
     if sys.stdout is None:  # Windows pythonw (no console): keep the log instead of losing it
         os.makedirs(APP_DIR, exist_ok=True)
         sys.stdout = sys.stderr = open(os.path.join(APP_DIR, "app.log"), "a", buffering=1)
+    os.chdir(os.path.expanduser("~"))  # nor can anything started from here, like the person's own Ollama, hold it
     headless, use_browser = "--no-browser" in sys.argv, "--browser" in sys.argv
     existing = None if "--port" in sys.argv else running_instance()  # an explicit port means "start another"
     if existing:  # opened twice: just bring up the one already running
@@ -719,13 +1257,15 @@ if __name__ == "__main__":
     if installed_models() is None:
         start_ollama()
     port_arg = sys.argv[sys.argv.index("--port") + 1] if "--port" in sys.argv else "8765"
-    server = make_server(int(port_arg))
+    httpd = server = make_server(int(port_arg))
     PORT = server.server_address[1]
     url = f"http://127.0.0.1:{PORT}/"
     os.makedirs(APP_DIR, exist_ok=True)
     with open(STATE, "w") as f:
         json.dump({"port": PORT, "pid": os.getpid()}, f)
     print(f"Survival LLM is running at {url}", flush=True)
+    check_my_files()  # files put in the folder while the app was closed
+    threading.Thread(target=auto_check_updates, daemon=True).start()
     try:
         if headless or use_browser:
             if use_browser:

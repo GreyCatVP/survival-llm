@@ -40,11 +40,12 @@ while who whom why will with would you your yours yourself yourselves""".split()
 
 class Library:
     def __init__(self, path=DB_PATH):
-        self.db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        # check_same_thread=False only so a library swap can close it from another thread (see app/server.py)
+        self.db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, check_same_thread=False)
         try:
             self.db.execute("SELECT 1 FROM sources LIMIT 1")
         except sqlite3.OperationalError:  # e.g. a WAL-mode file on a read-only disk
-            self.db = sqlite3.connect(f"file:{path}?immutable=1", uri=True)
+            self.db = sqlite3.connect(f"file:{path}?immutable=1", uri=True, check_same_thread=False)
 
     def stats(self):
         """(articles, sources) that are fully indexed."""
@@ -59,9 +60,10 @@ class Library:
     def _read(self, file_id, offset, length):
         return self._read_bytes(file_id, offset, length).decode("utf-8", "replace")
 
-    def search(self, query, topic=None, limit=8):
-        """Best passages for a keyword query, at most one per article."""
-        words = [w for w in re.findall(r"[\w']+", query.lower()) if w not in STOPWORDS and len(w) > 1][:12]
+    def search(self, query, topic=None, limit=8, scores=False):
+        """Best passages for a keyword query, at most one per article. scores=True adds each result's ranking
+        score (lower is better) and how many of the query's words its passage contains, for merging result lists."""
+        words = query_words(query)
         if not words:
             return []
         terms = ['"' + w.replace('"', "") + '"' for w in words]
@@ -91,6 +93,10 @@ class Library:
             text = self._read(r[5], r[6], r[7])
             results.append({"id": pid, "title": r[2], "source": r[3], "official": r[8] in OFFICIAL_LABEL,
                             "snippet": _snippet(text, words)})
+            if scores:
+                low = f"{r[2]} {text}".lower()
+                results[-1].update(score=rank[pid] * AUTHORITY.get(r[8], 1.0),
+                                   matched=sum(w[:5] in low for w in words))
             if len(results) >= limit:
                 break
         return results
@@ -144,6 +150,11 @@ class Library:
         with open(os.path.join(TEXT_DIR, path), "rb") as f:
             f.seek(offset)
             return f.read(length)
+
+
+def query_words(query):
+    """The words of a query worth searching for."""
+    return [w for w in re.findall(r"[\w']+", query.lower()) if w not in STOPWORDS and len(w) > 1][:12]
 
 
 def _snippet(text, words, width=360):
