@@ -329,6 +329,10 @@ function renderSetup() {
     one-time ${s.engine.gb} GB download, and nothing else to install.</p>
     ${engineJob?.status === "error" ? `<p class="error">${esc(engineJob.error)}</p>` : ""}
     <button class="primary" type="button" id="get-engine">Download the AI engine (${s.engine.gb} GB)</button>`;
+  else if (s.engine?.install_command) step1 = `<p>Survival LLM uses the free Ollama engine to run the AI on this computer.
+    Install it while you have internet, by running this in a terminal:</p>
+    <p><code>${esc(s.engine.install_command)}</code></p>
+    <p>This page notices on its own when it's installed.</p>`;
   else step1 = `<p>Survival LLM uses the free Ollama app to run the AI on this computer. Install it while you have internet:
     <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a>. You don't need Ollama's own
     window; it just has to be running. This page notices on its own when it is.</p>`;

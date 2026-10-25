@@ -28,8 +28,16 @@ your computer and internet speed (the biggest AI model is 80 GB); you only click
 2. Open the extracted **Survival LLM** folder and double-click **Survival LLM.bat**. If Windows says it protected
    your PC, click **More info**, then **Run anyway**.
 
+**Linux** (64-bit; tested on Omarchy, an Arch Linux desktop)
+1. Get the code: `git clone https://github.com/anonnerdfrenzy/survival-llm.git`
+2. Run `survival-llm/packaging/install-linux.sh`. It adds **Survival LLM** to your app menu and a `survival-llm`
+   command. The app gets its own window if your system has WebKitGTK 4.1 (the script names the packages if it
+   doesn't); otherwise it opens in your web browser.
+
 **Then** the app opens in its own window and walks you through setup:
-1. **AI engine:** built into the Mac app. On Windows, one click downloads it (Ollama, 1.6 GB).
+1. **AI engine:** built into the Mac app. On Windows, one click downloads it (Ollama, 1.6 GB). On Linux, it shows
+   the command that installs Ollama for your graphics card (on Arch, `sudo pacman -S ollama-rocm` for AMD,
+   `ollama-cuda` for NVIDIA or `ollama-vulkan` for Intel).
 2. **AI model:** it suggests the best one for your computer's memory (below) and downloads it.
 3. **Library:** "Everything" (8.8 GB download) or "Essentials" (1.3 GB, without Wikipedia and iFixit).
 
@@ -41,8 +49,9 @@ your computer and internet speed (the biggest AI model is 80 GB); you only click
 Delete the app, then these folders: the AI models, in `~/.ollama/models` (shared with any other Ollama on the
 computer, so keep it if you use Ollama elsewhere), and the library, in `~/Survival LLM Library`. Your own files are in
 `~/Survival LLM Files`; keep that folder if you want them. The app's own
-settings are in `~/Library/Application Support/Survival LLM` on a Mac, and in `%APPDATA%\Survival LLM` plus the
-AI engine in `%LOCALAPPDATA%\Survival LLM` on Windows.
+settings are in `~/Library/Application Support/Survival LLM` on a Mac, in `%APPDATA%\Survival LLM` plus the
+AI engine in `%LOCALAPPDATA%\Survival LLM` on Windows, and in `~/.survival-llm` on Linux (run
+`packaging/install-linux.sh --uninstall` first to remove the app menu entry and command).
 
 ## Which model your computer gets
 
@@ -52,7 +61,7 @@ The app checks your memory and suggests a model. More memory, smarter model.
 |---|---|---|
 | Mac with 128 GB or more | NVIDIA Nemotron 3.5 Super (`nemotron-3.5-super:120b-a12b-nvfp4`) | 80 GB |
 | Mac with 32-96 GB | Qwen3.8 27B (`qwen3.8:27b-mlx`) | 18 GB |
-| Windows PC with 32 GB or more | NVIDIA Nemotron 3.5 Lightning (`nemotron-3.5-lightning:30b-a3b`) | 25 GB |
+| Windows or Linux PC with 32 GB or more | NVIDIA Nemotron 3.5 Lightning (`nemotron-3.5-lightning:30b-a3b`) | 25 GB |
 | Mac or PC with 16-31 GB | IBM Granite 4.2 8B (`granite4.2:8b`) | 6 GB |
 
 Nemotron Super needs 128 GB because macOS lets the graphics side use only about three quarters of memory.
