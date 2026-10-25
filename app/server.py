@@ -35,7 +35,8 @@ from urllib.parse import parse_qs, urlparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from core import HOST, capabilities, chat_events, installed_models, system_prompt, trim  # noqa: E402
+from core import (HOST, ToolUnsupported, capabilities, chat_events, endpoint_models, installed_models,  # noqa: E402
+                  normalise_base, set_endpoint, system_prompt, trim, using_endpoint)
 from library import myfiles  # noqa: E402
 from library.search import DB_PATH, LIB, TOPICS, Library  # noqa: E402
 
@@ -98,6 +99,10 @@ else:
     APP_DIR = os.path.join(os.path.expanduser("~"), ".survival-llm")
 STATE = os.path.join(APP_DIR, "server.json")
 CUSTOM_PROMPT = os.path.join(APP_DIR, "instructions.txt")  # the person's own edit of the AI's instructions
+# Which AI answers: this computer's Ollama, or an OpenAI-compatible endpoint the person set up themselves
+# (llama.cpp, LM Studio, vLLM, a hosted one). url / key / model / mode, in the settings folder beside
+# instructions.txt. The key lives only here and in that file: the page gets a masked copy, and it is never logged.
+ENDPOINT_FILE = os.path.join(APP_DIR, "endpoint.json")
 # The person's own files: a folder they can see, beside the library folder rather than in it (installing a library
 # pack replaces that folder), and its index, kept with the settings.
 MY_DIR = os.environ.get("SURVIVAL_LLM_FILES") or os.path.join(os.path.expanduser("~"), "Survival LLM Files")
@@ -333,9 +338,9 @@ def friendly_name(model):
     return entry["name"] if entry else model
 
 
-def model_caps(model):
-    if not caps_cache.get(model):  # never cache an empty answer from a stopped Ollama
-        caps_cache[model] = capabilities(model)
+def model_caps(model, refresh=False):
+    if refresh or not caps_cache.get(model):  # never cache an empty answer from a stopped Ollama
+        caps_cache[model] = capabilities(model)  # refresh=True: an endpoint just told us otherwise
     return caps_cache[model]
 
 
@@ -352,6 +357,93 @@ def library_packs():
         except OSError:
             manifest.update(failed_at=time.time(), error="offline")
     return manifest["packs"] or []
+
+
+# ---------- their own AI endpoint: an OpenAI-compatible one they already run, instead of Ollama ----------
+
+ENDPOINT_DEFAULTS = {"mode": "ollama", "url": "", "key": "", "model": ""}
+
+
+def read_endpoint_file():
+    """The endpoint saved in the settings folder; the defaults when there is none or the file is broken."""
+    saved = dict(ENDPOINT_DEFAULTS)
+    try:
+        with open(ENDPOINT_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return saved
+    if not isinstance(data, dict):
+        return saved
+    url = normalise_base(data.get("url"))
+    saved.update(mode="endpoint" if data.get("mode") == "endpoint" and url else "ollama", url=url,
+                 key=str(data.get("key") or ""), model=str(data.get("model") or ""))
+    return saved
+
+
+endpoint = read_endpoint_file()  # mode / url / key / model, from their settings
+endpoint_state = {"models": [], "checked": 0.0, "error": None}  # what the endpoint answered when last asked
+
+
+def mask_key(key):
+    """Enough of the key to tell which one it is, never the key itself."""
+    return "\u2022\u2022\u2022\u2022" + key[-4:] if len(key) > 4 else "\u2022" * len(key)
+
+
+def endpoint_report():
+    """What the endpoint panel shows: the address, a masked key, the models it lists, and any problem."""
+    return {"mode": endpoint["mode"], "url": endpoint["url"], "key_set": bool(endpoint["key"]),
+            "key_masked": mask_key(endpoint["key"]), "model": endpoint["model"],
+            "models": endpoint_state["models"], "error": endpoint_state["error"]}
+
+
+def apply_endpoint():
+    """Tell core which AI to talk to: their endpoint when it is switched on, this computer's Ollama otherwise."""
+    if endpoint["mode"] == "endpoint" and endpoint["url"]:
+        set_endpoint(endpoint["url"], endpoint["key"])
+    else:
+        set_endpoint("", "")
+    caps_cache.clear()  # what the old AI could do says nothing about the new one
+
+
+def save_endpoint():
+    """Write the setting to the settings folder, readable only by this user (the key is in it)."""
+    os.makedirs(APP_DIR, exist_ok=True)
+    with open(ENDPOINT_FILE, "w", encoding="utf-8") as f:
+        json.dump({k: endpoint[k] for k in ENDPOINT_DEFAULTS}, f)
+    try:
+        os.chmod(ENDPOINT_FILE, 0o600)
+    except OSError:
+        pass  # Windows: it lives in this user's own AppData folder
+
+
+def clear_endpoint():
+    """Forget their endpoint and go back to running everything on this computer."""
+    endpoint.update(ENDPOINT_DEFAULTS)
+    endpoint_state.update(models=[], checked=0.0, error=None)
+    try:
+        os.remove(ENDPOINT_FILE)
+    except OSError:
+        pass
+    apply_endpoint()
+
+
+def refresh_endpoint_models(force=False):
+    """Which models their endpoint has. Cached: the page polls status often, and a hosted endpoint should not be
+    asked on every poll (once a minute, unless something here changed)."""
+    if endpoint["mode"] != "endpoint" or not endpoint["url"]:
+        endpoint_state.update(models=[], error=None)
+        return []
+    if force or not endpoint_state["models"] or time.time() - endpoint_state["checked"] > 60:
+        endpoint_state["checked"] = time.time()
+        found = endpoint_models()
+        if found is None:
+            endpoint_state.update(error="Couldn't get the model list from that address. Check it, then try again.")
+        else:
+            endpoint_state.update(models=found, error=None)
+    return endpoint_state["models"]
+
+
+apply_endpoint()  # their saved choice, before anything else looks for an AI
 
 
 # ---------- Ollama: find it, start it, explain its errors ----------
@@ -432,6 +524,25 @@ def loaded_models():
 
 def friendly_error(exc):
     """Plain-language explanation of an Ollama or network failure."""
+    if using_endpoint():  # their own endpoint: same problems, different words (and nothing to restart here)
+        reason = getattr(exc, "reason", None) or exc
+        detail = ""
+        if isinstance(exc, urllib.error.HTTPError):
+            try:
+                detail = json.loads(exc.read().decode("utf-8", "replace")).get("error", "")
+            except (ValueError, OSError):
+                detail = ""
+            detail = str(detail.get("message") if isinstance(detail, dict) else detail)[:300]
+            if exc.code in (401, 403):
+                return "Your AI endpoint says that key is wrong. Check it, then try again."
+            if exc.code == 404:
+                return "Your AI endpoint has no model by that name. Pick one from its list, then try again."
+            return f"Your AI endpoint reported a problem ({exc.code}): {detail or exc.reason}."
+        if isinstance(reason, ConnectionRefusedError) or "refused" in str(reason).lower():
+            return f"Couldn't reach your AI endpoint at {endpoint['url']}. Start it, or check the address."
+        if isinstance(reason, OSError) and "timed out" in str(reason).lower():
+            return "Your AI endpoint took too long to answer. Try again, or use a faster one."
+        return f"Couldn't get an answer from your AI endpoint: {exc}"
     if isinstance(exc, urllib.error.HTTPError):
         try:
             detail = json.loads(exc.read().decode("utf-8", "replace")).get("error", "")
@@ -1055,6 +1166,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200 if doc else 404, doc or {"error": "not found"})
         if url.path == "/api/prompt":
             return self._send(200, {"default": system_prompt(library(), True), "custom": custom_prompt()})
+        if url.path == "/api/endpoint":  # their own AI endpoint, with the key masked
+            return self._send(200, endpoint_report())
         if url.path == "/api/myfiles":  # their files, and whether any are being read (?check=1: look for changes)
             if query.get("check"):
                 check_my_files()
@@ -1071,20 +1184,25 @@ class Handler(BaseHTTPRequestHandler):
     def _status(self):
         if time.monotonic() - my_files_checked[0] > 30:  # picks up files changed or added in the folder itself
             check_my_files()
-        models = installed_models()
-        if models is None:
+        remote = using_endpoint()
+        models = None if remote else installed_models()  # their endpoint does not mean Ollama should be started
+        if models is None and not remote:
             start_ollama()
         app, binary = ollama_locations()
         info = engine_info()
         lib = library()
         docs, sources = lib.stats() if lib else (0, 0)
         mine = lib.mine.stats()[0] if lib and lib.mine else 0
-        chat_models = [m.removesuffix(":latest") for m in models or [] if not any(x in m for x in NOT_CHAT)]
-        catalog = machine_catalog(chat_models)
+        remote_models = refresh_endpoint_models() if remote else []
+        chat_models = remote_models if remote else [m.removesuffix(":latest") for m in models or []
+                                                    if not any(x in m for x in NOT_CHAT)]
+        catalog = [] if remote else machine_catalog(chat_models)
         best = next((c["model"] for c in catalog if c["installed"] and c["fits"]), None)
+        if remote:  # the one they picked, or the first one the endpoint lists
+            best = endpoint["model"] if endpoint["model"] in remote_models else (remote_models or [None])[0]
         with dl_lock:
             jobs = [dict(j) for j in downloads.values()]
-        return {
+        status = {
             "ollama": models is not None, "ollama_installed": bool(app or binary), "ollama_starting": ollama_starting(),
             "engine": {"downloadable": bool(info and ENGINE and not (app or binary)),
                        "gb": round(info["bytes"] / 1e9, 1) if info else None},
@@ -1102,6 +1220,9 @@ class Handler(BaseHTTPRequestHandler):
             "update": {"app": (newer_app() or {}).get("version"), "library": bool(newer_library())},
             "machine": {"os": "macOS" if sys.platform == "darwin" else platform.system(), "ram_gb": ram_gb()},
             "topics": TOPICS}
+        if remote or endpoint["url"]:  # only when someone uses this: their own endpoint, key masked
+            status["endpoint"] = endpoint_report()
+        return status
 
     def do_POST(self):
         if not self._allowed():
@@ -1111,7 +1232,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._add_file(url)
         body = self._body()
         model = str(body.get("model") or "")
-        if model and not re.fullmatch(r"[\w.:/-]{1,120}", model):
+        # Their endpoint's model names are whatever that endpoint calls them, so they get the looser rule.
+        names = r"[\w.:/#\[\] +~-]{1,200}" if using_endpoint() else r"[\w.:/-]{1,120}"
+        if model and not re.fullmatch(names, model):
             return self._send(400, {"error": "bad model name"})
         if url.path == "/api/prompt":  # save the person's instructions ("" or reset: back to the default)
             text = "" if body.get("reset") else str(body.get("text") or "").strip()
@@ -1144,6 +1267,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"conversation": uuid.uuid4().hex})
         if url.path == "/api/chat":
             return self._chat(body)
+        if url.path == "/api/endpoint":  # save their own AI endpoint, switch between them, or forget it
+            return self._save_endpoint(body)
+        if url.path == "/api/endpoint/test":  # try an address before keeping it
+            return self._test_endpoint(body)
         if url.path == "/api/pull":
             started = start_job(f"model:{model}", friendly_name(model), pull_worker, model)
             return self._send(200 if started else 409, {"ok": started})
@@ -1153,7 +1280,8 @@ class Handler(BaseHTTPRequestHandler):
             started = start_job(f"library:{pack}", label, library_worker, pack)
             return self._send(200 if started else 409, {"ok": started})
         if url.path == "/api/warm":
-            warm_model(model)
+            if not using_endpoint():
+                warm_model(model)
             return self._send(200, {"ok": True})
         if url.path == "/api/engine":
             started = start_job("engine", "AI engine (Ollama)", engine_worker)
@@ -1242,6 +1370,69 @@ class Handler(BaseHTTPRequestHandler):
             reply["replaced"] = my_name(old)
         return self._send(200, reply)
 
+    def _save_endpoint(self, body):
+        """Save the AI endpoint they use instead of Ollama (address, key, model), switch between the two, or
+        forget the endpoint. The key is only ever echoed back masked."""
+        if body.get("clear"):
+            clear_endpoint()
+            conversations.clear()  # whatever they were asking the other AI is not this conversation's history
+            return self._send(200, endpoint_report())
+        if body.get("mode") in ("ollama", "endpoint"):
+            endpoint["mode"] = str(body["mode"])
+        if body.get("url") is not None:
+            base = normalise_base(body["url"])
+            if not base:
+                return self._send(400, {"error": "That is not an address. Try something like "
+                                                 "http://192.168.1.10:8000/v1", **endpoint_report()})
+            endpoint["url"] = base
+            endpoint_state.update(models=[], error=None)
+        if body.get("key") is not None:
+            key = str(body["key"]).strip()
+            if not re.fullmatch(r"[ -~]{0,300}", key):  # the key travels in an HTTP header, which is plain text
+                return self._send(400, {"error": "That key has characters an AI endpoint can't take. Paste it "
+                                                 "again, without extra spaces or odd characters.",
+                                        **endpoint_report()})
+            endpoint["key"] = key
+        if body.get("model") is not None:
+            endpoint["model"] = str(body["model"]).strip()
+        if endpoint["mode"] == "endpoint" and not endpoint["url"]:
+            return self._send(400, {"error": "Type the address of your AI endpoint first.", **endpoint_report()})
+        save_endpoint()
+        apply_endpoint()
+        conversations.clear()  # the next question starts with instructions that fit the AI now answering
+        if endpoint["mode"] == "endpoint":
+            models = refresh_endpoint_models(force=True)
+            if endpoint["model"] not in models:
+                endpoint["model"] = endpoint["model"] or (models or [""])[0]
+                save_endpoint()
+            if endpoint_state["error"]:
+                return self._send(400, {"error": endpoint_state["error"], **endpoint_report()})
+        else:
+            endpoint_state.update(models=[], error=None)
+        return self._send(200, endpoint_report())
+
+    def _test_endpoint(self, body):
+        """Try an address (and key) without saving it: does it answer, and which models does it offer?"""
+        base = normalise_base(body.get("url") if body.get("url") is not None else endpoint["url"])
+        if not base:
+            return self._send(400, {"ok": False, "message": "That is not an address. Try something like "
+                                                             "http://192.168.1.10:8000/v1"})
+        key = body.get("key") if body.get("key") is not None else endpoint["key"]
+        key = str(key or "").strip()
+        if not re.fullmatch(r"[ -~]{0,300}", key):
+            return self._send(400, {"ok": False, "message": "That key has characters an AI endpoint can't take."})
+        set_endpoint(base, key)  # try it as this address would be used, then put things back
+        models = endpoint_models()
+        apply_endpoint()
+        if models is None:
+            return self._send(200, {"ok": False,
+                                    "message": "Couldn't get a model list from that address. Check it and the key, "
+                                               "or use the address of the endpoint itself, e.g. "
+                                               "http://192.168.1.10:8000/v1."})
+        return self._send(200, {"ok": True, "models": models,
+                                "message": f"It answered. {len(models)} model{'' if len(models) == 1 else 's'} "
+                                           "to choose from."})
+
     def _chat(self, body):
         model, question = body.get("model"), (body.get("message") or "").strip()
         if not model or not question:
@@ -1251,18 +1442,25 @@ class Handler(BaseHTTPRequestHandler):
         if conv.get("model") != model:  # new chat, or the model changed mid-chat
             conv.update(model=model, messages=[{"role": "system", "content": prompt_for(caps)}])
         conv["run"] += 1  # a newer question on this chat stops any older one still running
-        run = conv["run"]
+        turn = conv["run"]
         messages = conv["messages"]
         keep = len(messages)
         messages.append({"role": "user", "content": question})
         trim(messages)
         self._stream_start()
-        events = chat_events(model, library(), messages, deep=bool(body.get("deep")), caps=caps,
-                             length=str(body.get("length") or "normal"))
+        finished = self._stream_turn(conv, turn, model, messages, caps, bool(body.get("deep")),
+                                     str(body.get("length") or "normal"))
+        if not finished and conv["run"] == turn:
+            del messages[keep:]  # forget the unanswered question so the next one starts clean
+
+    def _stream_turn(self, conv, turn, model, messages, caps, deep, length, excerpts=False):
+        """Stream one answer to the page; True when it finished. An endpoint that turns down tool calling is
+        retried once with library excerpts fed into the question instead."""
+        events = chat_events(model, library(), messages, deep=deep, caps=caps, length=length)
         finished, last_tick = False, 0.0
         try:
             for event in events:
-                if conv["run"] != run:
+                if conv["run"] != turn:
                     break
                 if event["type"] == "tick":  # heartbeat: writing it is how we notice a closed or stopped page
                     if time.monotonic() - last_tick > 0.5:
@@ -1271,18 +1469,29 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                     continue
                 self._event(event)
-            finished = conv["run"] == run
+            finished = conv["run"] == turn
         except (BrokenPipeError, ConnectionResetError):
             pass  # stopped, or the page was closed
+        except ToolUnsupported:
+            events.close()
+            if excerpts:  # already tried the excerpt way round: nothing left but say so plainly
+                try:
+                    self._event({"type": "error", "message": "Your AI endpoint refused that request. Check its "
+                                                             "address and key, then try again."})
+                except OSError:
+                    pass
+            else:
+                caps = model_caps(model, refresh=True)  # core now knows this endpoint cannot do it
+                messages[0]["content"] = prompt_for(caps)
+                return self._stream_turn(conv, turn, model, messages, caps, deep, length, excerpts=True)
         except Exception as exc:
             try:
                 self._event({"type": "error", "message": friendly_error(exc)})
             except OSError:
                 pass
         finally:
-            events.close()  # closes the request to Ollama, which stops generating
-            if not finished and conv["run"] == run:
-                del messages[keep:]  # forget the unanswered question so the next one starts clean
+            events.close()  # closes the request to the AI, which stops generating
+        return finished
 
 
 def custom_prompt():
@@ -1347,7 +1556,7 @@ if __name__ == "__main__":
         sys.exit(0)
     atexit.register(stop_engine)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # so a plain kill still stops the engine
-    if installed_models() is None:
+    if not using_endpoint() and installed_models() is None:  # their own endpoint means no reason to start Ollama
         start_ollama()
     port_arg = sys.argv[sys.argv.index("--port") + 1] if "--port" in sys.argv else "8765"
     httpd = server = make_server(int(port_arg))

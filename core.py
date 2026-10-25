@@ -7,12 +7,28 @@ Talks only to the local Ollama server, so it works with Wi-Fi off.
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 
 from library.search import STOPWORDS, TOPICS
 
 HOST = "http://" + os.environ.get("OLLAMA_HOST", "127.0.0.1:11434")
+# The person can use an AI endpoint they already run instead of Ollama: anything that answers the OpenAI API
+# (GET /v1/models and POST /v1/chat/completions) - llama.cpp, LM Studio, vLLM, an Ollama's own /v1, a hosted one.
+# None means "talk to Ollama", which is how everything works with no internet. app/server.py sets it from their
+# saved setting; a hosted endpoint is the one choice here that needs internet.
+ENDPOINT = None
+HOST_PORT = re.compile(r"^[A-Za-z0-9._\-]+(:\d{1,5})?$|^\[[0-9a-fA-F:.]+\](:\d{1,5})?$")  # host[:port], nothing else
+
+
+class ToolUnsupported(RuntimeError):
+    """The endpoint refused a request that asked it to call tools. The app then answers from library excerpts
+    put into the question instead, the same way it handles a local model that cannot call tools."""
+
+
+HOST_PORT = re.compile(r"^[A-Za-z0-9._\-]+(:\d{1,5})?$|^\[[0-9a-fA-F:.]+\](:\d{1,5})?$")  # host[:port], nothing else
 MAX_TOOL_ROUNDS = 6
 # Longest reply the model may write in one go, set by the person's "Length limit" (tokens; -1 = no limit). A model
 # stuck repeating itself would otherwise run, and drain the battery, until someone noticed (Qwen 3.6 once went an
@@ -74,7 +90,101 @@ SAMPLING = {
 _shown = {}  # model -> Ollama's /api/show answer
 
 
+def normalise_base(url):
+    """http://host:port/v1 from whatever the person typed: "host:port", a trailing slash, or a full API URL.
+    Returns "" when it is not an http address at all."""
+    url = str(url or "").strip().rstrip("/")
+    if url and not re.match(r"(?i)^https?://", url):
+        url = "http://" + url
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not HOST_PORT.fullmatch(parts.netloc):
+        return ""
+    path = parts.path
+    for tail in ("/chat/completions", "/completions", "/models"):
+        if path.endswith(tail):
+            path = path[:-len(tail)]
+            break
+    return f"{parts.scheme}://{parts.netloc}{path if path.endswith('/v1') else path + '/v1'}"
+
+
+def set_endpoint(url="", key=""):
+    """Answer from this OpenAI-compatible endpoint instead of Ollama; "" goes back to Ollama."""
+    global ENDPOINT
+    base, key = normalise_base(url), str(key or "")
+    if (ENDPOINT or {}).get("base") == base and (ENDPOINT or {}).get("key") == key:
+        return
+    ENDPOINT = {"base": base, "key": key} if base else None
+    _shown.clear()  # what Ollama knew about models says nothing about this one
+    _endpoint_caps.clear()  # and neither does what that endpoint could do
+
+
+def using_endpoint():
+    return bool(ENDPOINT)
+
+
+def _endpoint_headers():
+    """Headers for the person's endpoint. Its key goes nowhere else."""
+    key = (ENDPOINT or {}).get("key") or ""
+    return {"Content-Type": "application/json", **({"Authorization": "Bearer " + key} if key else {})}
+
+
+def _endpoint_request(path, body=None, stream=False, timeout=20):
+    """One request to the person's endpoint, e.g. path "/models" or "/chat/completions"."""
+    req = urllib.request.Request((ENDPOINT or {"base": ""})["base"] + path,
+                                 data=json.dumps(body).encode() if body is not None else None,
+                                 headers=_endpoint_headers())
+    resp = urllib.request.urlopen(req, timeout=timeout)
+    return resp if stream else json.load(resp)
+
+
+def endpoint_models():
+    """The model names this endpoint offers (GET /v1/models); None when it did not answer."""
+    if not ENDPOINT:
+        return None
+    try:
+        data = _endpoint_request("/models")
+    except (OSError, ValueError):
+        return None
+    items = data.get("data") if isinstance(data, dict) else None
+    return [str(m["id"]) for m in items or [] if isinstance(m, dict) and m.get("id")]
+
+
+_endpoint_caps = {}  # model -> what the endpoint just configured can do, asked once per model
+
+
+def capabilities(model):
+    if ENDPOINT:
+        if model not in _endpoint_caps:
+            _endpoint_caps[model] = {"tools"} if _probes_tools(model) else set()
+        return set(_endpoint_caps[model])
+    return set(_show(model).get("capabilities") or [])
+
+
+def _probes_tools(model):
+    """Does this endpoint understand tool calling? /v1/models does not say, so ask it to call a do-nothing tool
+    and see whether it does: servers that cannot usually refuse the request outright or answer plain text."""
+    probe = {"model": model, "stream": False, "max_tokens": 40,
+             "messages": [{"role": "user", "content": "Call the ping tool to check that tools work. Nothing else."}],
+             "tools": [{"type": "function", "function": {"name": "ping", "description": "No-op check.",
+                                                          "parameters": {"type": "object", "properties": {}}}}],
+             "tool_choice": {"type": "function", "function": {"name": "ping"}}}
+    try:
+        data = _endpoint_request("/chat/completions", probe, timeout=60)
+    except (OSError, ValueError):
+        return False  # it refused a request with tools, or never answered: use library excerpts instead
+    if not isinstance(data, dict):
+        return False
+    for choice in data.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        if choice.get("finish_reason") == "tool_calls" or (choice.get("message") or {}).get("tool_calls"):
+            return True
+    return False
+
+
 def _show(model):
+    if ENDPOINT:
+        return {}  # an endpoint has nothing like /api/show to ask
     if model not in _shown:
         try:
             _shown[model] = _post("/api/show", {"model": model})
@@ -98,10 +208,6 @@ def _post(path, body, stream=False):
                                  headers={"Content-Type": "application/json"})
     resp = urllib.request.urlopen(req, timeout=900)
     return resp if stream else json.load(resp)
-
-
-def capabilities(model):
-    return set(_show(model).get("capabilities") or [])
 
 
 def think_setting(model, caps, deep=False):
@@ -167,6 +273,11 @@ def run_tool(library, name, args):
 
 
 def _stream(model, messages, tools, think, options):
+    """What the model says, one chunk at a time, always in Ollama's shape: {"message": {...}}, then a final
+    chunk with done, eval_count and eval_duration."""
+    if ENDPOINT:
+        yield from _openai_stream(model, messages, tools, options)
+        return
     body = {"model": model, "messages": messages, "stream": True, "keep_alive": "15m", "options": options}
     if tools:
         body["tools"] = tools
@@ -175,6 +286,110 @@ def _stream(model, messages, tools, think, options):
     with _post("/api/chat", body, stream=True) as resp:
         for line in resp:
             yield json.loads(line)
+
+
+def _openai_messages(messages):
+    """The conversation in the shape an OpenAI-compatible endpoint expects: a tool result carries the id of the
+    call it answers, and a tool call's arguments are JSON text."""
+    out = []
+    for m in messages:
+        if m["role"] == "tool":
+            out.append({"role": "tool", "tool_call_id": m.get("tool_call_id") or m.get("tool_name") or "",
+                        "content": m.get("content") or ""})
+            continue
+        entry = {k: v for k, v in m.items() if k in ("role", "content")}
+        entry["content"] = entry.get("content") or ""
+        if m.get("tool_calls"):  # Ollama hands back arguments as a dict; the OpenAI API wants a string
+            entry["tool_calls"] = [{"id": c.get("id") or "", "type": "function", "function": {
+                "name": (c.get("function") or {}).get("name") or "",
+                "arguments": args if isinstance(args := (c.get("function") or {}).get("arguments"), str)
+                else json.dumps(args or {})}} for c in m["tool_calls"]]
+        out.append(entry)
+    return out
+
+
+def _openai_body(model, messages, tools, options):
+    """The request for /v1/chat/completions: only the fields the OpenAI API has, since many servers reject the
+    rest (num_ctx, keep_alive, top_k and thinking settings are Ollama's own)."""
+    body = {"model": model, "stream": True, "messages": _openai_messages(messages)}
+    if tools:
+        body["tools"] = tools
+    limit = options.get("num_predict")
+    if isinstance(limit, int) and limit > 0:
+        body["max_tokens"] = limit
+    for field in ("temperature", "top_p"):
+        if field in options:
+            body[field] = options[field]
+    return body
+
+
+def _delta_message(delta, calls):
+    """One streamed piece from the endpoint, in Ollama's shape; tool calls arrive in pieces and are joined here."""
+    msg = {}
+    if delta.get("content"):
+        msg["content"] = delta["content"]
+    thought = delta.get("reasoning_content") or delta.get("reasoning") or delta.get("thinking")
+    if thought:
+        msg["thinking"] = thought
+    for call in delta.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        slot = calls.setdefault(call.get("index", len(calls)), {"id": "", "function": {"name": "", "arguments": ""}})
+        slot["id"] = call.get("id") or slot["id"]
+        fn = call.get("function") or {}
+        slot["function"]["name"] += fn.get("name") or ""
+        slot["function"]["arguments"] += fn.get("arguments") or ""
+    return msg
+
+
+def _openai_stream(model, messages, tools, options):
+    """The endpoint's SSE stream, translated into Ollama's chunks so the rest of chat_events does not change."""
+    body = _openai_body(model, messages, tools, options)
+    try:
+        resp = _endpoint_request("/chat/completions", body, stream=True, timeout=900)
+    except urllib.error.HTTPError as exc:
+        if tools:  # it may be an endpoint that does not do tool calling at all
+            _endpoint_caps[model] = set()
+            raise ToolUnsupported(str(exc)) from exc
+        raise
+    calls, usage, chars, finish, started = {}, {}, 0, "", time.monotonic()
+    said = False
+    with resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue  # blank separator lines and ": keep-alive" comments
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            if not payload:
+                continue
+            try:
+                chunk = json.loads(payload)
+            except ValueError:
+                raise RuntimeError("That endpoint didn't send an answer I could read.") from None
+            if not isinstance(chunk, dict):
+                continue
+            usage = chunk.get("usage") or usage
+            choice = next((c for c in chunk.get("choices") or [] if isinstance(c, dict)), {})
+            delta = choice.get("delta") or choice.get("message") or {}
+            msg = _delta_message(delta, calls)
+            chars += len(msg.get("content", ""))
+            if msg:
+                said = True
+                yield {"message": msg}
+            if choice.get("finish_reason"):
+                finish = choice["finish_reason"]
+                break
+    made = [dict(c, id=c["id"] or f"call_{n + 1}") for n, c in enumerate(calls.values()) if c["function"]["name"]]
+    if not finish and not said and not made:  # it answered, but not with anything usable
+        raise RuntimeError("That endpoint didn't send an answer I could read.")
+    if not finish:  # it closed the stream without ever saying it was finished: still worth showing what it said
+        finish = "stop"
+    yield {"message": {"tool_calls": made} if made else {}, "done": True,
+           "done_reason": "length" if finish == "length" else "stop",
+           "eval_count": usage.get("completion_tokens") or max(chars // 4, 0),
+           "eval_duration": int((time.monotonic() - started) * 1e9)}
 
 
 def attach_excerpts(library, messages):
@@ -256,14 +471,16 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
         if not calls:
             break
         looked = True
-        for call in calls:
+        for n, call in enumerate(calls):
             fn = call.get("function", {})
+            call["id"] = call.get("id") or f"call_{round_no + 1}_{n + 1}"  # an OpenAI endpoint wants an id on every call
             args = fn.get("arguments") or {}
             if isinstance(args, str):
                 try:
                     args = json.loads(args or "{}")
                 except ValueError:
                     args = {}
+            fn["arguments"] = args  # kept as a dict here, written back as text when an endpoint asks for that
             result, event = run_tool(library, fn.get("name"), args)
             if event:
                 if event["type"] in ("read", "show"):
@@ -271,7 +488,8 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
                 for hit in event.get("results", []):
                     seen.setdefault(hit["id"], {k: hit.get(k) for k in ("title", "source", "official")})
                 yield event
-            messages.append({"role": "tool", "tool_name": fn.get("name"), "content": result})
+            messages.append({"role": "tool", "tool_name": fn.get("name"), "tool_call_id": call["id"],
+                             "content": result})
     answer, unfinished = messages[-1]["content"], False
     read = _one_per_article([{"id": k, **v} for k, v in sources.items()])
     found = _one_per_article(read + [{"id": k, **v} for k, v in seen.items()])  # read first, then the rest
@@ -453,6 +671,7 @@ def trim(messages, budget=60000):
 
 
 def installed_models():
+    """Models Ollama has (None when it is not running); an endpoint's own models come from endpoint_models()."""
     try:
         with urllib.request.urlopen(HOST + "/api/tags", timeout=5) as resp:
             return [m["name"] for m in json.load(resp).get("models", [])]
