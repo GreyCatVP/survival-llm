@@ -33,8 +33,8 @@ your computer and internet speed (the biggest AI model is 80 GB); you only click
 2. **AI model:** it suggests the best one for your computer's memory (below) and downloads it.
 3. **Library:** "Everything" (8.8 GB download) or "Essentials" (1.3 GB, without Wikipedia and iFixit).
 
-**Free disk space needed:** the model's size plus 5 GB, plus about 36 GB while the full library installs
-(19 GB once installed), or about 10 GB for Essentials (3 GB once installed).
+**Free disk space needed:** the model's size plus 5 GB, plus about 27 GB while the full library installs
+(21 GB once installed), or about 10 GB for Essentials (3 GB once installed).
 
 ## Uninstall
 

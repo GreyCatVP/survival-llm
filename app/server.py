@@ -6,9 +6,12 @@ on Windows), or one the person installed. Everything else is the Python standard
 """
 import atexit
 import base64
+import bisect
 import ctypes
+import errno
 import filecmp
 import hashlib
+import io
 import json
 import os
 import platform
@@ -269,8 +272,30 @@ def ram_gb():
     return round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30)
 
 
-def disk_free_gb():
-    return round(shutil.disk_usage(os.path.expanduser("~")).free / 1e9)
+def disk_free_bytes(path=None):
+    """Free space on the disk holding path (default: the home folder), as Finder and System Settings count it on a
+    Mac: that includes space macOS frees when something needs it (caches, local snapshots, iCloud copies of files),
+    which can make it tens of GB more than the plain figure."""
+    path = os.path.abspath(path or os.path.expanduser("~"))
+    while not os.path.exists(path):  # a folder that isn't made yet: its disk is its parent's
+        path = os.path.dirname(path)
+    free = shutil.disk_usage(path).free
+    if sys.platform == "darwin":
+        try:
+            import objc
+            from Foundation import NSURL, NSURLVolumeAvailableCapacityForImportantUsageKey  # pywebview depends on these
+            with objc.autorelease_pool():
+                ok, value, _ = NSURL.fileURLWithPath_(path).getResourceValue_forKey_error_(
+                    None, NSURLVolumeAvailableCapacityForImportantUsageKey, None)
+            if ok and value is not None:
+                free = max(free, int(value))
+        except Exception:  # run from source without pywebview: the plain figure
+            pass
+    return free
+
+
+def disk_free_gb(path=None):
+    return round(disk_free_bytes(path) / 1e9)
 
 
 def system_key():
@@ -420,6 +445,8 @@ def friendly_error(exc):
         if "memory" in low:
             return "There isn't enough free memory for this model. Close other apps, or pick a smaller model under Model."
         return f"The AI engine reported a problem: {detail or exc.reason}."
+    if getattr(exc, "errno", None) == errno.ENOSPC:
+        return "The disk is full. Free up some space, then try again."
     reason = getattr(exc, "reason", exc)
     if isinstance(reason, ConnectionRefusedError) or "refused" in str(reason).lower():
         start_ollama()
@@ -495,9 +522,10 @@ def engine_worker(key):
     info = engine_info()
     if not info or not ENGINE:
         raise RuntimeError("This version of the app can't download the AI engine. Install Ollama from ollama.com.")
-    need = info["bytes"] * 2.5 / 1e9  # the zip plus its unpacked copy, briefly at the same time
-    if need + DISK_MARGIN_GB > disk_free_gb():
-        raise RuntimeError(f"Not enough free disk space: the AI engine needs about {need:.0f} GB while installing.")
+    need = info["bytes"] * 2.5 / 1e9 + DISK_MARGIN_GB  # the zip plus its unpacked copy, briefly at the same time
+    if need > disk_free_gb():
+        raise RuntimeError(f"Not enough free disk space: installing the AI engine needs about {need:.0f} GB free, "
+                           f"and this computer has {disk_free_gb()} GB.")
     folder = os.path.dirname(ENGINE)
     zip_path, partial = folder + ".zip", folder + ".partial"
     os.makedirs(os.path.dirname(folder), exist_ok=True)
@@ -516,36 +544,99 @@ def engine_worker(key):
     start_ollama()
 
 
+class PackParts(io.RawIOBase):
+    """A pack's downloaded parts, read as the one zip they were cut from, so it unpacks without a joined copy."""
+
+    def __init__(self, paths):
+        self.paths = paths
+        self.sizes = [os.path.getsize(p) for p in paths]
+        self.starts = [sum(self.sizes[:n]) for n in range(len(paths))]
+        self.size, self.pos, self.part, self.file = sum(self.sizes), 0, None, None
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.pos
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        self.pos = offset + (0, self.pos, self.size)[whence]
+        return self.pos
+
+    def readinto(self, buffer):
+        """Fill the whole buffer, across parts if need be (zipfile takes a short read for a damaged file)."""
+        view, done = memoryview(buffer).cast("B"), 0
+        while done < len(view) and self.pos < self.size:
+            n = bisect.bisect_right(self.starts, self.pos) - 1
+            if n != self.part:
+                self.close_part()
+                self.file, self.part = open(self.paths[n], "rb"), n
+            self.file.seek(self.pos - self.starts[n])
+            got = self.file.readinto(view[done:done + self.starts[n] + self.sizes[n] - self.pos])
+            if not got:
+                raise OSError(f"{self.paths[n]} is shorter than it was")
+            done += got
+            self.pos += got
+        return done
+
+    def free_before(self, offset):
+        """Delete the parts that end before offset: nothing from there on is read from them."""
+        for n, path in enumerate(self.paths):
+            if self.starts[n] + self.sizes[n] <= offset and os.path.exists(path):
+                if n == self.part:
+                    self.close_part()
+                os.remove(path)
+
+    def close_part(self):
+        if self.file:
+            self.file.close()
+        self.file, self.part = None, None
+
+    def close(self):
+        self.close_part()
+        super().close()
+
+
 def library_worker(key, pack_id):
-    """Download a pack's parts (resumable, checksummed), join them, unzip into the library folder."""
+    """Download a pack's parts (resumable, checksummed), then unzip straight from them into the library folder."""
     pack = next((p for p in library_packs() if p["id"] == pack_id), None)
     if not pack:
         raise RuntimeError("That library pack isn't available. Check the internet connection.")
-    total = sum(part["bytes"] for part in pack["parts"])
-    need = total / 1e9 * 3.5  # the zip plus its unpacked copy (about 2.3 times the zip), briefly at the same time
-    if need + DISK_MARGIN_GB > disk_free_gb():
-        raise RuntimeError(f"Not enough free disk space: this pack needs about {need:.0f} GB while installing.")
     work, partial = LIB + ".download", LIB + ".partial"
+    shutil.rmtree(partial, ignore_errors=True)  # left by an install that stopped while unpacking
     os.makedirs(work, exist_ok=True)
+    paths = [os.path.join(work, f"{pack_id}.{n:03d}") for n in range(len(pack["parts"]))]
+    total = sum(part["bytes"] for part in pack["parts"])
+    # the most on disk at once: the unpacked library plus the parts not unpacked yet (the manifest has the exact
+    # figure; unpacked is about 2.4 times the zip); parts downloaded by an earlier try are already on the disk
+    peak = pack.get("install_bytes") or total * 3.5
+    have = sum(os.path.getsize(p) for p in paths if os.path.exists(p))
+    need = (peak - have) / 1e9 + DISK_MARGIN_GB
+    if need > disk_free_gb(os.path.dirname(LIB)):
+        raise RuntimeError(f"Not enough free disk space: installing this pack needs about {need:.0f} GB free, "
+                           f"and this computer has {disk_free_gb(os.path.dirname(LIB))} GB.")
     done_before = 0
-    for n, part in enumerate(pack["parts"]):
-        path = os.path.join(work, f"{pack_id}.{n:03d}")
+    for n, (part, path) in enumerate(zip(pack["parts"], paths)):
         _download(key, part["url"], path, part["bytes"], done_before, total)
         if _sha256(path) != part["sha256"]:
             os.remove(path)
             raise RuntimeError(f"Part {n + 1} of {len(pack['parts'])} was damaged in transit. Try again to re-download it.")
         done_before += part["bytes"]
     _update(key, status="unpacking", completed=total, total=total)
-    zip_path = os.path.join(work, f"{pack_id}.zip")
-    with open(zip_path, "wb") as out:  # join the parts, freeing each as we go
-        for n in range(len(pack["parts"])):
-            path = os.path.join(work, f"{pack_id}.{n:03d}")
-            with open(path, "rb") as f:
-                shutil.copyfileobj(f, out, 1 << 24)
-            os.remove(path)
-    shutil.rmtree(partial, ignore_errors=True)
-    with zipfile.ZipFile(zip_path) as z:
-        z.extractall(partial)
+    parts = PackParts(paths)
+    try:
+        with zipfile.ZipFile(parts) as z:
+            for member in sorted(z.infolist(), key=lambda m: m.header_offset):
+                parts.free_before(member.header_offset)  # each part goes as soon as everything in it is unpacked
+                z.extract(member, partial)
+    except BaseException:
+        shutil.rmtree(partial, ignore_errors=True)  # don't leave a half-unpacked library taking up the disk
+        raise
+    finally:
+        parts.close()
     with open(os.path.join(partial, "pack.json"), "w") as f:  # which pack this is, for update checks
         json.dump({"id": pack_id, "version": pack.get("version", FIRST_PACKS)}, f)
     old = LIB + ".old"
@@ -617,6 +708,7 @@ def valid_packs(packs):
     return isinstance(packs, list) and all(
         isinstance(p, dict) and isinstance(p.get("id"), str) and isinstance(p.get("label"), str)
         and isinstance(p.get("gb"), (int, float)) and isinstance(p.get("version", ""), str)
+        and isinstance(p.get("install_bytes", 0), int)
         and isinstance(p.get("parts"), list) and all(isinstance(x, dict) and isinstance(x.get("bytes"), int)
                                                      and isinstance(x.get("url"), str) for x in p["parts"])
         for p in packs)
@@ -784,8 +876,10 @@ def app_update_worker(key):
     if blocker or not app:
         raise RuntimeError(blocker or "There's no newer version to install.")
     pkg = app[platform_key()]
-    if pkg["bytes"] * 3 / 1e9 + 1 > disk_free_gb():
-        raise RuntimeError("Not enough free disk space for the update.")
+    need = pkg["bytes"] * 3 / 1e9 + 1
+    if need > disk_free_gb():
+        raise RuntimeError(f"Not enough free disk space for the update: it needs about {need:.0f} GB free, "
+                           f"and this computer has {disk_free_gb()} GB.")
     work = os.path.join(APP_DIR, "update")
     os.makedirs(work, exist_ok=True)
     zip_path = os.path.join(work, f"Survival-LLM-{re.sub(r'[^0-9.]', '', app['version'])}-{platform_key()}.zip")
@@ -1106,8 +1200,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": myfiles.CANT_READ})
         if size > MAX_UPLOAD:
             return self._send(413, {"error": "This file is too big (over 4 GB)."})
-        if size + 1e9 > shutil.disk_usage(os.path.dirname(MY_DIR) if os.path.isdir(os.path.dirname(MY_DIR))
-                                          else os.path.expanduser("~")).free:
+        if size + 1e9 > disk_free_bytes(MY_DIR):
             return self._send(507, {"error": "There isn't enough free disk space for this file."})
         os.makedirs(MY_DIR, exist_ok=True)
         part = os.path.join(MY_DIR, f".{uuid.uuid4().hex}.part")
