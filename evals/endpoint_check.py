@@ -301,6 +301,9 @@ def run_checks(app, ports, home, library):
     done = next((e for e in events if e["type"] == "done"), {})
     check("an excerpt answer still shows its sources", done.get("sources") and "token" in types(events),
           str(types(events)[:6]))
+    text = "".join(e.get("text", "") for e in events if e["type"] == "token") + done.get("answer", "")
+    check("no tool markup leaks into what the person sees", not any(t in text for t in ("<tool_call", "<function")),
+          text[:80])
 
     # 5. A model typed in by hand (not in its model list) still chats.
     code, report = app.post_json("/api/endpoint", {"url": notools, "model": "my-custom-model"})
@@ -433,6 +436,10 @@ def run_checks(app, ports, home, library):
     status = app.get_json("/api/status")
     check("after clearing, status looks like a fresh copy's again", set(status) == expected,
           f"extra: {sorted(set(status) - expected)}")
+
+    # Everything above, taken together: nothing crashed on the way.
+    check("no traceback anywhere in the app's log", "Traceback" not in app.read_log(),
+          app.read_log()[-200:])
     return app
 
 
