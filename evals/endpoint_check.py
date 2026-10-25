@@ -177,7 +177,7 @@ def main():
     home, library = os.path.join(work, "home"), os.path.join(work, "library")
     make_library(library)
     ports = {mode: free_port() for mode in ("tools", "no-tools", "flaky", "deny-key", "broken", "short", "slow",
-                                            "thinking", "quiet")}
+                                            "thinking", "quiet", "silent")}
     mocks = {mode: serve(port, mode, KEY if mode == "deny-key" else "") for mode, port in ports.items()}
     app = App(home, library, free_port())
     try:
@@ -352,6 +352,21 @@ def run_checks(app, ports, home, library):
     check("an answer it can't read gives one plain error", "read" in next((e for e in events if e["type"] == "error"),
                                                                            {}).get("message", "").lower(),
           str([e for e in events if e["type"] == "error"])[:160])
+
+    # 6d. A model the endpoint doesn't have, and an endpoint that opens the stream and says nothing.
+    code, report = app.post_json("/api/endpoint", {"url": f"http://127.0.0.1:{ports['tools']}/v1", "model": "missing-model"})
+    events = app.chat("missing-model", "How long is food in the fridge safe?", conversation="missing")
+    check("a model the endpoint doesn't have is named plainly", "no model by that name" in
+          next((e for e in events if e["type"] == "error"), {}).get("message", "").lower(),
+          str([e for e in events if e["type"] == "error"])[:160])
+    app.post_json("/api/endpoint", {"url": f"http://127.0.0.1:{ports['silent']}/v1", "model": "mock-model"})
+    started = time.time()
+    events = app.chat("mock-model", "How long is food in the fridge safe?", conversation="silent")
+    took = time.time() - started
+    error = next((e for e in events if e["type"] == "error"), {})
+    check("an endpoint that never answers is given up on with a plain message", "never answered" in
+          error.get("message", "").lower(), error.get("message", "")[:120])
+    check("it is given up on in under a minute, not left hanging", took < 60, f"{took:.0f}s")
 
     # 7. Switch back to this computer's Ollama, and the setting survives a restart.
     code, report = app.post_json("/api/endpoint", {"mode": "ollama"})

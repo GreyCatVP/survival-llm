@@ -354,17 +354,19 @@ def _openai_stream(model, messages, tools, options):
         raise
     calls, usage, chars, finish, started = {}, {}, 0, "", time.monotonic()
     said, quiet = False, started
-    try:  # a thinking endpoint can go quiet for a while; this is how the app notices a stopped page meanwhile
-        resp.fp.raw._sock.settimeout(6)
+    try:  # an endpoint that opens the stream and then says nothing must not hold the person's question forever
+        resp.fp.raw._sock.settimeout(45)
     except (AttributeError, OSError):
         pass
-    with resp:  # closing it is how the app stops an answer it no longer wants
+    with resp:
         while True:
             try:
                 raw = resp.readline()
-            except TimeoutError:
-                yield {"message": {}}  # nothing to show yet: a heartbeat, which is also how Stop is noticed
-                continue
+            except (TimeoutError, OSError) as exc:
+                if "timed out" not in str(exc):
+                    raise
+                raise RuntimeError("That endpoint connected but never answered. Check that it is still "
+                                   "running, then try again.") from None
             if not raw:
                 break
             line = raw.decode("utf-8", "replace").strip()

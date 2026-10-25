@@ -14,7 +14,9 @@ Modes:
   short     cuts the answer off at the length limit (finish_reason "length")
   slow      dribbles the answer out, so a test can cut it short
   thinking  sends its thinking as reasoning deltas first, the way OpenAI-compatible reasoning models do
-  quiet     leaves long gaps between pieces, so a test can see the heartbeats with Stop
+  quiet     leaves long gaps between pieces, so a test can see the heartbeats
+  silent    answers 200 and then never says anything (the app must not hang on it)
+A request for the model "missing-model" gets 404, whatever the mode. with Stop
 
 GET /_log shows every request it took (path, Authorization header, body), so the tests can check what the
 app asked for and where the key went.
@@ -84,6 +86,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": {"message": "not json", "type": "invalid_request_error"}})
         self.log.append({"path": self.path, "authorization": self.headers.get("Authorization", ""), "body": body})
         path = self.path.split("?")[0]
+        if path == "/v1/chat/completions" and body.get("model") == "missing-model":
+            return self._json(404, {"error": {"message": "the model you asked for isn't here",
+                                              "type": "invalid_request_error"}})
         if path != "/v1/chat/completions":
             return self._json(404, {"error": {"message": "no such path", "type": "invalid_request_error"}})
         if not self._key_ok():
@@ -112,6 +117,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             return self.wfile.write(data)
+        if self.mode == "silent":  # it opens the stream and then says nothing at all
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            time.sleep(240)
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -170,7 +181,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8123)
     parser.add_argument("--mode", default="tools", choices=["tools", "no-tools", "flaky", "no-calls", "deny-key",
-                                                            "broken", "short", "slow", "thinking", "quiet"])
+                                                            "broken", "short", "slow", "thinking", "quiet", "silent"])
     parser.add_argument("--key", default="")
     args = parser.parse_args()
     serve(args.port, args.mode, args.key)
