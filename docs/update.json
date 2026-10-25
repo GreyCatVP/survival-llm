@@ -1,19 +1,19 @@
 {
- "version": "0.2.0",
+ "version": "0.2.1",
  "date": "2026-10-24",
  "notes": [
-  "Your files: add your own PDFs, Word documents, ebooks, web pages and notes, and the AI searches them along with the library.",
-  "Check for updates, at the bottom of the window, installs new versions in one click.",
-  "The AI names its sources, and the app checks them against the articles it actually opened."
+  "Fixes a false \"Not enough free disk space\" message on Macs: free space is now counted the way System Settings counts it.",
+  "Installing the Everything library needs about 27 GB free instead of 36.",
+  "If the disk fills up during an install, the app says so plainly, and trying again only downloads what it has to."
  ],
  "mac": {
-  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.2.0/Survival-LLM-mac.zip",
-  "bytes": 212761936,
-  "sha256": "dc66dae30711bd82b96a955f63e998da5ba43a6a4ca6c47bcd891c9acf250792"
+  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.2.1/Survival-LLM-mac.zip",
+  "bytes": 212763282,
+  "sha256": "f598d1694c99d214d4a0077fa96dbf8a6f63b05da13fc14f763db529099b9f9d"
  },
  "windows": {
-  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.2.0/Survival-LLM-windows.zip",
-  "bytes": 25171330,
-  "sha256": "0acf1d02e2a123e6c0c7ac73744a322a019d9112c7ff0153a4123ddfacc8a294"
+  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.2.1/Survival-LLM-windows.zip",
+  "bytes": 25172684,
+  "sha256": "e08132d981f2b291f129a80139a7ef9ae2f444fb5c765302eaf67becc416fbe6"
  }
 }
