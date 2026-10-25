@@ -177,7 +177,7 @@ def main():
     home, library = os.path.join(work, "home"), os.path.join(work, "library")
     make_library(library)
     ports = {mode: free_port() for mode in ("tools", "no-tools", "flaky", "deny-key", "broken", "short", "slow",
-                                            "thinking")}
+                                            "thinking", "quiet")}
     mocks = {mode: serve(port, mode, KEY if mode == "deny-key" else "") for mode, port in ports.items()}
     app = App(home, library, free_port())
     try:
@@ -387,19 +387,30 @@ def run_checks(app, ports, home, library):
     check("the new question is answered after cutting one short", "done" in types(events), str(types(events)[:6]))
 
     # The page's Stop: closing the answer's connection ends the turn, and the chat forgets that question.
+    app.post_json("/api/endpoint", {"url": f"http://127.0.0.1:{ports['quiet']}/v1", "model": "mock-model"})
     resp = app.req("POST", "/api/chat", {"model": "mock-model", "message": "Tell me about blackout food safety",
-                                         "conversation": "stopped"})
-    pieces = 0
-    for raw in resp:
+                                         "conversation": "quiet"})
+    ticks, pieces = 0, 0
+    for raw in resp:  # read the whole answer: quiet stretches still get a heartbeat
+        line = raw.decode("utf-8", "replace").strip()
+        if line.startswith(":"):
+            ticks += 1
         pieces += 1
-        if pieces >= 4:
+    resp.close()
+    check("the answer stream keeps its heartbeat comments between quiet stretches", ticks >= 1, f"{ticks} ticks seen")
+
+    # The page's Stop: closing the answer's connection ends the turn, and the chat forgets that question.
+    resp = app.req("POST", "/api/chat", {"model": "mock-model", "message": "And what about a closed freezer?",
+                                         "conversation": "stopped"})
+    for pieces, raw in enumerate(resp, start=1):  # stop reading early, which is what pressing Stop does
+        if pieces >= 2:
             break
     resp.close()
-    time.sleep(1.5)  # the server notices when it next tries to write
-    app.chat("mock-model", "What about a closed freezer?", conversation="stopped")
-    asked = [r for r in mock_log(ports["slow"]) if r["path"] == "/v1/chat/completions"]
+    time.sleep(8)  # through the next quiet gap, which is when the app finds the page has gone
+    app.chat("mock-model", "What about half a freezer?", conversation="stopped")
+    asked = [r for r in mock_log(ports["quiet"]) if r["path"] == "/v1/chat/completions"]
     check("a stopped answer is not left in the chat", not any(
-        "Tell me about blackout food safety" in str(m.get("content")) for m in asked[-1]["body"]["messages"]),
+        "And what about a closed freezer?" in str(m.get("content")) for m in asked[-1]["body"]["messages"]),
           "the next question's request still carried the question nobody answered")
 
     # 9. Test button: an address is tried without saving it, and says what happened in plain words.
@@ -412,7 +423,7 @@ def run_checks(app, ports, home, library):
     check("Test rejects something that is not an address", code == 400 and "not an address" in
           json.dumps(report).lower(), json.dumps(report)[:120])
     check("Test did not change the saved endpoint", app.get_json("/api/endpoint")["url"].endswith(
-        f"{ports['slow']}/v1"), app.get_json("/api/endpoint")["url"])
+        f"{ports['quiet']}/v1"), app.get_json("/api/endpoint")["url"])
 
     # 10. Forget it entirely: the file is gone and everything is back to running locally.
     code, report = app.post_json("/api/endpoint", {"clear": True})

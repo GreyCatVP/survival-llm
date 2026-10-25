@@ -13,7 +13,8 @@ Modes:
   broken    answers 200 with something that is not an answer at all
   short     cuts the answer off at the length limit (finish_reason "length")
   slow      dribbles the answer out, so a test can cut it short
-  thinking  sends its thinking as reasoning deltas first, the way OpenAI-compatible reasoning models do with Stop
+  thinking  sends its thinking as reasoning deltas first, the way OpenAI-compatible reasoning models do
+  quiet     leaves long gaps between pieces, so a test can see the heartbeats with Stop
 
 GET /_log shows every request it took (path, Authorization header, body), so the tests can check what the
 app asked for and where the key went.
@@ -127,6 +128,12 @@ class Handler(BaseHTTPRequestHandler):
             yield {"choices": [{"delta": {"content": ANSWER}, "finish_reason": "stop"}],
                    "usage": {"completion_tokens": 40}}
             return
+        if self.mode == "quiet":  # long gaps between pieces, like a model that thinks before it speaks
+            for part in (ANSWER[:40], ANSWER[40:80], ANSWER[80:]):
+                yield {"choices": [{"delta": {"content": part}, "finish_reason": None}]}
+                time.sleep(1.8)
+            yield {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"completion_tokens": 40}}
+            return
         if self.mode == "slow":  # dribble it out so a test can cut it short
             for part in re.findall(r".{1,28}", ANSWER):
                 yield {"choices": [{"delta": {"content": part}, "finish_reason": None}]}
@@ -163,7 +170,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8123)
     parser.add_argument("--mode", default="tools", choices=["tools", "no-tools", "flaky", "no-calls", "deny-key",
-                                                            "broken", "short", "slow", "thinking"])
+                                                            "broken", "short", "slow", "thinking", "quiet"])
     parser.add_argument("--key", default="")
     args = parser.parse_args()
     serve(args.port, args.mode, args.key)

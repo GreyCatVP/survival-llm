@@ -353,9 +353,20 @@ def _openai_stream(model, messages, tools, options):
             raise ToolUnsupported(str(exc)) from exc
         raise
     calls, usage, chars, finish, started = {}, {}, 0, "", time.monotonic()
-    said = False
-    with resp:
-        for raw in resp:
+    said, quiet = False, started
+    try:  # a thinking endpoint can go quiet for a while; this is how the app notices a stopped page meanwhile
+        resp.fp.raw._sock.settimeout(6)
+    except (AttributeError, OSError):
+        pass
+    with resp:  # closing it is how the app stops an answer it no longer wants
+        while True:
+            try:
+                raw = resp.readline()
+            except TimeoutError:
+                yield {"message": {}}  # nothing to show yet: a heartbeat, which is also how Stop is noticed
+                continue
+            if not raw:
+                break
             line = raw.decode("utf-8", "replace").strip()
             if not line.startswith("data:"):
                 continue  # blank separator lines and ": keep-alive" comments
@@ -375,6 +386,10 @@ def _openai_stream(model, messages, tools, options):
             delta = choice.get("delta") or choice.get("message") or {}
             msg = _delta_message(delta, calls)
             chars += len(msg.get("content", ""))
+            now = time.monotonic()
+            if msg and now - quiet > 1.0 and not finish:  # it was quiet long enough for the page to wonder
+                yield {"message": {}}
+            quiet = now
             if msg:
                 said = True
                 yield {"message": msg}
