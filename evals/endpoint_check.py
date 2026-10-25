@@ -176,7 +176,8 @@ def main():
     work = tempfile.mkdtemp(prefix="sllm-check-")
     home, library = os.path.join(work, "home"), os.path.join(work, "library")
     make_library(library)
-    ports = {mode: free_port() for mode in ("tools", "no-tools", "flaky", "deny-key", "broken", "short", "slow")}
+    ports = {mode: free_port() for mode in ("tools", "no-tools", "flaky", "deny-key", "broken", "short", "slow",
+                                            "thinking")}
     mocks = {mode: serve(port, mode, KEY if mode == "deny-key" else "") for mode, port in ports.items()}
     app = App(home, library, free_port())
     try:
@@ -278,7 +279,14 @@ def run_checks(app, ports, home, library):
           str(asked and asked[-1]["body"].get("max_tokens")))
     app.chat("mock-model", "No limit please", length="none")
     asked = [r for r in mock_log(ports["tools"]) if r["path"] == "/v1/chat/completions"]
-    check("no Length limit sends no max_tokens", "max_tokens" not in asked[-1]["body"], str(asked[-1]["body"]))
+    check("no Length limit sends no max_tokens", "max_tokens" not in asked[-1]["body"], str(asked[-1]["body"])[:160])
+    events = app.chat("mock-model", "Open the freezer article for me", conversation="show")
+    check("its show_article call opens an article on the person's screen",
+          any(e["type"] == "show" for e in events), str(types(events)[:8]))
+    app.post_json("/api/endpoint", {"url": f"http://127.0.0.1:{ports['thinking']}/v1", "model": "mock-model"})
+    events = app.chat("mock-model", "How long is food in the fridge safe?", conversation="think")
+    check("an endpoint that thinks first shows a thinking event", "thinking" in types(events), str(types(events)[:8]))
+    app.post_json("/api/endpoint", {"url": url, "model": "mock-model"})
 
     # 4. An endpoint that cannot do tool calling: library excerpts, no error, sources still shown.
     notools = f"http://127.0.0.1:{ports['no-tools']}/v1"

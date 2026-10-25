@@ -12,7 +12,8 @@ Modes:
   deny-key  401 for both /v1/models and /chat/completions unless the key is exactly right
   broken    answers 200 with something that is not an answer at all
   short     cuts the answer off at the length limit (finish_reason "length")
-  slow      dribbles the answer out, so a test can cut it short with Stop
+  slow      dribbles the answer out, so a test can cut it short
+  thinking  sends its thinking as reasoning deltas first, the way OpenAI-compatible reasoning models do with Stop
 
 GET /_log shows every request it took (path, Authorization header, body), so the tests can check what the
 app asked for and where the key went.
@@ -32,7 +33,10 @@ ANSWER = ("Keep the fridge closed: the food in it stays safe for about 4 hours, 
 def plan(messages):
     """What this mock does next: look something up, open what it found, or answer from what it read."""
     results = [m for m in messages if m.get("role") == "tool"]
+    question = next((m.get("content") or "" for m in reversed(messages) if m.get("role") == "user"), "")
     if not results:
+        if "open" in question.lower():
+            return {"name": "show_article", "arguments": {"id": 1}}
         return {"name": "search_library", "arguments": {"query": "food fridge blackout how long safe"}}
     found = re.search(r"\[id (\d+)\]", results[-1].get("content") or "")
     if found and len(results) < 3:
@@ -92,7 +96,7 @@ class Handler(BaseHTTPRequestHandler):
                                               "type": "invalid_request_error"}})
         probe = bool(body.get("tool_choice"))
         asked_for_tools = bool(body.get("tools")) or probe
-        next_call = plan(messages) if asked_for_tools and self.mode in ("tools", "flaky") else None
+        next_call = plan(messages) if asked_for_tools and self.mode in ("tools", "flaky") else None  # noqa
         if not body.get("stream"):  # the app's one non-streaming request: does it understand tools?
             if next_call:
                 return self._json(200, {"choices": [{"message": {"role": "assistant", "tool_calls": [
@@ -117,6 +121,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(b"data: [DONE]\n\n")
 
     def _deltas(self, body, next_call):
+        if self.mode == "thinking":  # a reasoning model: it thinks before it answers
+            yield {"choices": [{"delta": {"role": "assistant", "reasoning_content": "Fridge, blackout, how long…"},
+                               "finish_reason": None}]}
+            yield {"choices": [{"delta": {"content": ANSWER}, "finish_reason": "stop"}],
+                   "usage": {"completion_tokens": 40}}
+            return
         if self.mode == "slow":  # dribble it out so a test can cut it short
             for part in re.findall(r".{1,28}", ANSWER):
                 yield {"choices": [{"delta": {"content": part}, "finish_reason": None}]}
@@ -153,7 +163,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8123)
     parser.add_argument("--mode", default="tools", choices=["tools", "no-tools", "flaky", "no-calls", "deny-key",
-                                                            "broken", "short", "slow"])
+                                                            "broken", "short", "slow", "thinking"])
     parser.add_argument("--key", default="")
     args = parser.parse_args()
     serve(args.port, args.mode, args.key)
