@@ -231,6 +231,20 @@ textarea:focus { border-color: var(--accent); }
 .step.done h3 .num { background: #2e7d4a; color: #fff; }
 .pack-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
 
+/* their own AI endpoint */
+.source-toggle { display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 12px; }
+.src-opt { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 14px; cursor: pointer; }
+.src-opt.on { border-color: var(--accent); background: var(--cite); font-weight: 650; }
+.endpoint-panel { border: 1px solid var(--line); border-radius: 12px; background: var(--bg); padding: 12px 14px;
+  margin-bottom: 14px; }
+.endpoint-panel .fld { display: block; margin: 8px 0; }
+.endpoint-panel .fld > span, .endpoint-panel .fld { font-size: 13px; color: var(--muted); }
+.endpoint-panel input, .endpoint-panel select { display: block; width: 100%; box-sizing: border-box; margin-top: 4px;
+  padding: 8px 10px; font: inherit; font-size: 14px; color: var(--text); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; }
+.endpoint-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+.endpoint-actions .meta { margin-right: auto; overflow-wrap: anywhere; }
+
 @media (max-width: 820px) {
   .layout.with-reader { grid-template-columns: minmax(0, 1fr); }
   .reader { position: fixed; inset: 0; z-index: 10; border-left: 0; }

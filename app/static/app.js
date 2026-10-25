@@ -9,6 +9,7 @@ const els = {
   modelsIntro: $("models-intro"), announce: $("announce"), libraryBtn: $("library-btn"),
 };
 let state = null;          // last /api/status
+let endpoint = null;       // last /api/endpoint: which AI answers, and their own one if they set one up
 let currentModel = null;   // Ollama name of the model answering
 let conversation = null;
 let busy = null;           // AbortController while an answer streams
@@ -107,7 +108,10 @@ function md(src) {
 const nameOf = (model) => (state?.models.find((m) => m.model === model)?.name) || model || "none yet";
 const jobFor = (key) => state?.downloads.find((d) => d.key === key);
 const activeJobs = () => (state?.downloads || []).filter((d) => ["starting", "downloading", "unpacking"].includes(d.status));
-const isReady = () => state && state.ollama && state.models.length && state.library;
+const isReady = () => state && aiReady() && state.models.length && state.library;
+const aiReady = () => endpoint?.mode === "endpoint" ? state?.models.length > 0 : !!state?.ollama;
+const endpointMode = () => endpoint?.mode === "endpoint";
+const hostOf = (url) => (String(url || "").split("//")[1] || "").split("/")[0];
 const isLoaded = (model) => !!model && (state?.loaded || []).includes(model.replace(/:latest$/, ""));
 
 async function loadStatus() {
@@ -124,6 +128,7 @@ async function loadStatus() {
     return;
   }
   const installed = state.models.map((m) => m.model);
+  if (state.endpoint) endpoint = state.endpoint;  // which AI answers, straight from the server
   if (!installed.includes(currentModel)) {
     const saved = recall("model");
     const before = currentModel;
@@ -141,7 +146,7 @@ async function loadStatus() {
 
 function schedulePoll() {
   clearTimeout(pollTimer);
-  const quick = activeJobs().length || state?.warming.length || state?.ollama_starting || !state?.ollama;
+  const quick = activeJobs().length || state?.warming.length || state?.ollama_starting || !aiReady();
   pollTimer = setTimeout(loadStatus, quick ? 1500 : isReady() ? 15000 : 6000);
 }
 
@@ -151,7 +156,16 @@ function setStatus(kind, html) {
 
 function renderStatus() {
   const s = state;
-  if (!s.ollama) {
+  if (endpointMode()) {  // their own endpoint: nothing here to start or download
+    if (!s.models.length) {
+      setStatus("off", `Your AI endpoint (${esc(hostOf(endpoint.url))}) isn't answering`);
+    } else if (!s.library) {
+      setStatus("warn", `<a href="#setup">Setup not finished: needs the library</a>`);
+    } else {
+      const mine = s.my_files?.ready ? ` + ${s.my_files.ready.toLocaleString()} of your files` : "";
+      setStatus("on", `Answering from ${esc(hostOf(endpoint.url))} · ${s.library.articles.toLocaleString()} articles${mine}`);
+    }
+  } else if (!s.ollama) {
     setStatus(s.ollama_installed ? "warn" : "off", s.ollama_installed
       ? (s.ollama_starting ? "Starting the AI engine…" : "The AI engine (Ollama) isn't running")
       : "Setup not finished: the AI engine is needed");
@@ -172,7 +186,8 @@ function showModel() {
   els.using.hidden = !currentModel;
   if (currentModel) {
     els.using.innerHTML = `Answering with <strong>${esc(nameOf(currentModel))}</strong>`
-      + (entry ? ` by ${esc(entry.maker)}. ${esc(entry.blurb)}` : ".")
+      + (endpointMode() ? ` at ${esc(hostOf(endpoint.url))}.`
+         : entry ? ` by ${esc(entry.maker)}. ${esc(entry.blurb)}` : ".")
       + ` <button class="ghost" type="button" id="change-model">Change model</button>`;
     $("change-model").onclick = openModels;
   }
@@ -199,6 +214,8 @@ function selectModel(model, btn = null) {
   currentModel = model;
   remember("model", model);
   warm(model);
+  if (endpointMode()) api("/api/endpoint", { method: "POST", body: JSON.stringify({ model }) })
+    .then((r) => r.json()).then((e) => { endpoint = e; }).catch(() => {});  // remember which endpoint model they chose
   if (chatting) newChat();
   if (els.dialog.open) els.dialog.close();
   showModel();
@@ -258,7 +275,8 @@ function modelRows(container, { onlyFitting = false } = {}) {
   }
   const others = state.models.filter((m) => !state.catalog.some((c) => c.installed && c.model === m.model));
   if (others.length && !onlyFitting) {
-    container.insertAdjacentHTML("beforeend", `<div class="group-title">Other models on this computer</div>`);
+    container.insertAdjacentHTML("beforeend", `<div class="group-title">${endpointMode()
+      ? "Models on your endpoint" : "Other models on this computer"}</div>`);
     for (const m of others) {
       const current = m.model === currentModel;
       const row = document.createElement("div");
@@ -266,7 +284,8 @@ function modelRows(container, { onlyFitting = false } = {}) {
       row.dataset.key = m.model;
       row.innerHTML = `<div class="mr-main"><div class="mr-title">${esc(m.name)}
         ${current ? '<span class="badge inuse">In use</span>' : ""}</div>
-        <div class="mr-meta">${m.tested ? "Another copy of a model listed above." : "Not tested with Survival LLM; answers may be worse."}</div></div>
+        <div class="mr-meta">${endpointMode() ? "A model on your own endpoint; not one we tested with Survival LLM."
+          : m.tested ? "Another copy of a model listed above." : "Not tested with Survival LLM; answers may be worse."}</div></div>
         <div class="mr-action"><button type="button" class="ghost" ${current ? "disabled" : ""}>${current ? "In use" : "Use this"}</button></div>`;
       row.querySelector("button").onclick = (e) => selectModel(m.model, e.currentTarget);
       container.appendChild(row);
@@ -276,15 +295,79 @@ function modelRows(container, { onlyFitting = false } = {}) {
 }
 
 function renderModels() {
-  els.modelsIntro.textContent = `This ${state.machine.os} computer has ${state.machine.ram_gb} GB of memory (RAM) and `
+  els.modelsIntro.textContent = endpointMode()
+    ? `Answers come from your own endpoint at ${endpoint.url}. Pick which of its models to use, or change the
+      address, key and model below.`
+    : `This ${state.machine.os} computer has ${state.machine.ram_gb} GB of memory (RAM) and `
     + `${state.disk_free_gb} GB of free disk space. Bigger models know more but need more memory and are slower. `
     + "Download while you have internet, and leave Survival LLM open until it finishes; an interrupted download picks up where it left off.";
+  renderEndpoint();
   modelRows(els.modelsList);
 }
-function openModels() {
+async function openModels() {
   if (!state) return;
+  await loadEndpoint();
   renderModels();
   els.dialog.showModal();
+}
+
+// ---------- their own AI endpoint: address, key, model ----------
+async function loadEndpoint() {
+  try { endpoint = await (await api("/api/endpoint")).json(); } catch { /* status says when the app is gone */ }
+}
+
+function renderEndpoint() {
+  const on = endpointMode();
+  $("src-ollama").classList.toggle("on", !on);
+  $("src-endpoint").classList.toggle("on", on);
+  $("endpoint-panel").hidden = !on;
+  $("endpoint-forget").hidden = !endpoint?.url;
+  if (!on) return;
+  const e = endpoint, typing = (id) => document.activeElement === $(id);
+  if (!typing("endpoint-url")) $("endpoint-url").value = e.url || "";
+  if (!typing("endpoint-key")) $("endpoint-key").value = "";  // the app never sends the key back to the page
+  $("endpoint-key").placeholder = e.key_set ? `saved (${e.key_masked}) - blank keeps it` : "blank if it needs none";
+  $("endpoint-model").innerHTML = (e.models || []).map((m) => `<option value="${esc(m)}"${m === e.model ? " selected" : ""}>${esc(m)}</option>`).join("")
+    || '<option value="">nothing to choose yet</option>';
+  const listed = (e.models || []).includes(e.model);
+  if (!typing("endpoint-custom")) $("endpoint-custom").value = e.model && !listed ? e.model : "";
+}
+
+function endpointForm() {
+  const body = { mode: "endpoint", url: $("endpoint-url").value.trim() };
+  if ($("endpoint-key").value.trim()) body.key = $("endpoint-key").value.trim();
+  body.model = $("endpoint-custom").value.trim() || $("endpoint-model").value || "";
+  return body;
+}
+
+async function saveEndpoint(body, done) {
+  const note = $("endpoint-status");
+  note.textContent = "Saving…";
+  try {
+    const resp = await api("/api/endpoint", { method: "POST", body: JSON.stringify(body) });
+    const saved = await resp.json();
+    if (!resp.ok) { endpoint = saved; renderEndpoint(); note.textContent = saved.error || "Couldn't save that."; return; }
+    endpoint = saved;
+    currentModel = saved.model || null;
+    remember("model", currentModel);
+    newChat();  // the other AI's questions and lookups are not this conversation's history
+    note.textContent = done;
+    announce(done);
+    renderEndpoint();
+    await loadStatus();
+  } catch { note.textContent = "Couldn't reach Survival LLM."; }
+}
+
+async function testEndpoint() {
+  const note = $("endpoint-status");
+  note.textContent = "Trying…";
+  try {
+    const body = { url: $("endpoint-url").value.trim() };
+    if ($("endpoint-key").value.trim()) body.key = $("endpoint-key").value.trim();
+    const resp = await api("/api/endpoint/test", { method: "POST", body: JSON.stringify(body) });
+    const out = await resp.json();
+    note.textContent = out.message || (out.ok ? "It answered." : "That address didn't answer.");
+  } catch { note.textContent = "Couldn't reach Survival LLM."; }
 }
 
 async function startModelDownload(c) {
@@ -317,6 +400,7 @@ function renderSetup() {
     if (!currentModel && s.models.some((m) => m.model === model)) selectModel(model);
   }
   const hasModel = s.models.length > 0;
+  const remote = endpointMode();
   const steps = [];
   let step1;
   const engineJob = jobFor("engine");
@@ -332,21 +416,30 @@ function renderSetup() {
   else step1 = `<p>Survival LLM uses the free Ollama app to run the AI on this computer. Install it while you have internet:
     <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a>. You don't need Ollama's own
     window; it just has to be running. This page notices on its own when it is.</p>`;
-  steps.push(`<div class="step ${s.ollama ? "done" : ""}"><h3><span class="num">${s.ollama ? "✓" : "1"}</span>AI engine</h3>${step1}</div>`);
-  if (s.ollama) {
-    const fitting = s.catalog.filter((c) => c.fits && c.fits_disk);
-    let modelStep;
-    if (hasModel) modelStep = `<p>Using ${esc(nameOf(currentModel))}. You can change it any time with Model at the top.</p>`;
-    else if (fitting.length) modelStep = `<p>Pick one for this ${esc(s.machine.os)} computer (${s.machine.ram_gb} GB of memory,
-      ${s.disk_free_gb} GB free disk). The recommended one is the smartest that fits.</p><div id="setup-models"></div>`;
-    else {
-      const small = s.catalog.reduce((a, b) => (b.gb < a.gb ? b : a));
-      modelStep = `<p>This computer has ${s.machine.ram_gb} GB of memory and ${s.disk_free_gb} GB free disk; even the smallest model
-        (${esc(small.name)}) wants ${small.min_ram} GB of memory and ${small.gb + 5} GB of disk. You can try it anyway (answers will be
-        slow), or use Search library without the AI.</p>
-        <button class="ghost" type="button" id="try-anyway">Try ${esc(small.name)} anyway (${small.gb} GB)</button>`;
+  if (remote) {  // their own endpoint: nothing to install here, only an address to check
+    steps.push(`<div class="step ${hasModel ? "done" : ""}"><h3><span class="num">${hasModel ? "✓" : "1"}</span>AI</h3>
+      ${hasModel ? `<p>Answering from your own AI endpoint at ${esc(s.endpoint.url)}${s.endpoint.model ? `, using ${esc(s.endpoint.model)}` : ""}. Change it any time with Model at the top.</p>`
+        : `<p>Your endpoint didn't answer${s.endpoint.error ? `: ${esc(s.endpoint.error)}` : ""}. Check its address and key under Model.</p>`}
+      <button class="ghost" type="button" id="edit-endpoint">Change the AI</button></div>`);
+  } else {
+    steps.push(`<div class="step ${s.ollama ? "done" : ""}"><h3><span class="num">${s.ollama ? "✓" : "1"}</span>AI engine</h3>${step1}</div>`);
+    if (s.ollama) {
+      const fitting = s.catalog.filter((c) => c.fits && c.fits_disk);
+      let modelStep;
+      if (hasModel) modelStep = `<p>Using ${esc(nameOf(currentModel))}. You can change it any time with Model at the top.</p>`;
+      else if (fitting.length) modelStep = `<p>Pick one for this ${esc(s.machine.os)} computer (${s.machine.ram_gb} GB of memory,
+        ${s.disk_free_gb} GB free disk). The recommended one is the smartest that fits.</p><div id="setup-models"></div>`;
+      else {
+        const small = s.catalog.reduce((a, b) => (b.gb < a.gb ? b : a));
+        modelStep = `<p>This computer has ${s.machine.ram_gb} GB of memory and ${s.disk_free_gb} GB free disk; even the smallest model
+          (${esc(small.name)}) wants ${small.min_ram} GB of memory and ${small.gb + 5} GB of disk. You can try it anyway (answers will be
+          slow), or use Search library without the AI.</p>
+          <button class="ghost" type="button" id="try-anyway">Try ${esc(small.name)} anyway (${small.gb} GB)</button>`;
+      }
+      steps.push(`<div class="step ${hasModel ? "done" : ""}"><h3><span class="num">${hasModel ? "✓" : "2"}</span>AI model</h3>${modelStep}</div>`);
     }
-    steps.push(`<div class="step ${hasModel ? "done" : ""}"><h3><span class="num">${hasModel ? "✓" : "2"}</span>AI model</h3>${modelStep}</div>`);
+  }
+  if (remote ? hasModel : s.ollama) {
     let libStep;
     if (s.library) libStep = `<p>Installed: ${s.library.articles.toLocaleString()} articles.</p>`;
     else {
@@ -366,7 +459,7 @@ function renderSetup() {
             folder at ${esc(s.library_dir)}.</p>`;
       }
     }
-    steps.push(`<div class="step ${s.library ? "done" : ""}"><h3><span class="num">${s.library ? "✓" : "3"}</span>Offline library</h3>${libStep}</div>`);
+    steps.push(`<div class="step ${s.library ? "done" : ""}"><h3><span class="num">${s.library ? "✓" : remote ? 2 : 3}</span>Offline library</h3>${libStep}</div>`);
   }
   const needsSetup = !isReady();
   els.setup.hidden = !needsSetup;
@@ -379,6 +472,7 @@ function renderSetup() {
   const focusedId = document.activeElement?.id, focusedPack = document.activeElement?.dataset?.pack;
   els.setup.innerHTML = html;
   if ($("start-ollama")) $("start-ollama").onclick = () => api("/api/start-ollama", { method: "POST", body: "{}" }).then(loadStatus);
+  if ($("edit-endpoint")) $("edit-endpoint").onclick = openModels;
   if ($("get-engine")) $("get-engine").onclick = () => api("/api/engine", { method: "POST", body: "{}" }).then(loadStatus);
   if ($("try-anyway")) $("try-anyway").onclick = () => startModelDownload(s.catalog.reduce((a, b) => (b.gb < a.gb ? b : a)));
   const box = $("setup-models");
@@ -640,6 +734,21 @@ els.reader.onkeydown = (e) => { if (e.key === "Escape") hideReader(); };
 $("new-chat").onclick = () => { newChat(); els.input.focus(); };
 $("model-btn").onclick = openModels;
 $("close-models").onclick = () => els.dialog.close();
+$("src-ollama").onclick = () => saveEndpoint({ mode: "ollama" }, "Answering with this computer's Ollama again.");
+$("src-endpoint").onclick = () => {
+  if (endpoint?.mode === "endpoint") { saveEndpoint({ mode: "endpoint" }, "Answering from your endpoint again."); return; }
+  endpoint = { mode: "endpoint", url: "", key: "", key_set: false, key_masked: "", model: "", models: [], error: null };
+  renderEndpoint();  // show the fields; nothing is saved until they press Save and use
+  $("endpoint-status").textContent = "Type the address of your endpoint, then save it.";
+  $("endpoint-url").focus();
+};
+$("endpoint-save").onclick = () => saveEndpoint(endpointForm(), "Saved. Answering from your endpoint.");
+$("endpoint-test").onclick = testEndpoint;
+$("endpoint-off").onclick = () => saveEndpoint({ mode: "ollama" }, "Your endpoint is turned off; Ollama answers again.");
+$("endpoint-forget").onclick = (e) => {
+  if (!confirmClick(e.currentTarget, "Forget the saved address and key: click again")) return;
+  saveEndpoint({ clear: true }, "Your endpoint is forgotten.");
+};
 
 // ---------- the person's own files ----------
 const FILE_TYPES = [".pdf", ".docx", ".odt", ".epub", ".html", ".htm", ".txt", ".md", ".markdown", ".csv"];

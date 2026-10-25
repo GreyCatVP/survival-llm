@@ -83,6 +83,29 @@
     <button id="close-models" class="ghost icon" type="button" aria-label="Close">✕</button>
   </div>
   <p class="meta" id="models-intro"></p>
+  <div class="group-title">Which AI answers</div>
+  <div class="source-toggle" id="source-toggle" role="group" aria-label="Which AI answers your questions">
+    <button id="src-ollama" class="ghost src-opt" type="button">On this computer (Ollama)</button>
+    <button id="src-endpoint" class="ghost src-opt" type="button">An endpoint I provide</button>
+  </div>
+  <div id="endpoint-panel" class="endpoint-panel" hidden>
+    <p class="meta">An AI service you already run that answers the OpenAI API: llama.cpp, LM Studio, vLLM, Kobold, a
+      hosted one. Its key stays on this computer, in the Survival LLM settings folder, and only ever goes to that
+      address. Using an endpoint on another computer or a hosted service needs internet.</p>
+    <label class="fld">Address<input id="endpoint-url" type="text" spellcheck="false" autocomplete="off"
+      placeholder="http://192.168.1.10:8000/v1"></label>
+    <label class="fld">Key<input id="endpoint-key" type="password" autocomplete="off"></label>
+    <label class="fld">Model<select id="endpoint-model"></select></label>
+    <label class="fld">Other model name<input id="endpoint-custom" type="text" spellcheck="false" autocomplete="off"
+      placeholder="a model this endpoint knows that isn't in the list"></label>
+    <div class="endpoint-actions">
+      <span id="endpoint-status" class="meta" aria-live="polite"></span>
+      <button id="endpoint-test" class="ghost" type="button">Test</button>
+      <button id="endpoint-save" class="primary" type="button">Save and use</button>
+      <button id="endpoint-off" class="ghost" type="button">Turn off</button>
+    </div>
+    <p class="meta"><button id="endpoint-forget" class="link" type="button">Forget this endpoint</button></p>
+  </div>
   <div id="models-list"></div>
 </dialog>
 <dialog id="prompt-dialog" class="dialog wide" aria-labelledby="prompt-title">

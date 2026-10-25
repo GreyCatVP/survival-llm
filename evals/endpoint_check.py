@@ -187,7 +187,35 @@ def main():
             httpd.shutdown()
         print(f"\n{len(PASS)} passed, {len(FAIL)} failed" + (f": {', '.join(FAIL)}" if FAIL else ""))
         shutil.rmtree(work, ignore_errors=True)
-        return 1 if FAIL else 0
+    return 1 if FAIL else 0
+
+
+def check_ui(app):
+    """The page itself: the source toggle and the endpoint panel are there, wired, and the key field is a password."""
+    with urllib.request.urlopen(app.base + "/", timeout=10) as resp:
+        page = resp.read().decode()
+    with urllib.request.urlopen(app.base + "/static/app.js", timeout=10) as resp:
+        script = resp.read().decode()
+    ids = set(re.findall(r'id="([a-z0-9-]+)"', page))
+    wanted = ["source-toggle", "src-ollama", "src-endpoint", "endpoint-panel", "endpoint-url", "endpoint-key",
+              "endpoint-model", "endpoint-custom", "endpoint-status", "endpoint-test", "endpoint-save",
+              "endpoint-off", "endpoint-forget"]
+    check("the page has the source toggle and the endpoint panel", all(i in ids for i in wanted),
+          str([i for i in wanted if i not in ids]))
+    check("the key box is a password field", 'id="endpoint-key" type="password"' in page)
+    check("the page offers both sources in plain words", "On this computer (Ollama)" in page
+          and "An endpoint I provide" in page)
+    check("there is a model list and a model name you can type", 'id="endpoint-model"' in page
+          and 'id="endpoint-custom"' in page and "Other model name" in page)
+    check("Test, Save and turn-off actions are there", all(
+        f'id="{i}"' in page for i in ("endpoint-test", "endpoint-save", "endpoint-off", "endpoint-forget")))
+    wired = [i for i in wanted if i != "source-toggle" and f'$("{i}")' in script]
+    check("the front end wires every one of them", len(wired) == len(wanted) - 1,
+          str([i for i in wanted if i != "source-toggle" and f'$("{i}")' not in script]))
+    made = {a or b for a, b in re.findall(r'\$\("([a-z0-9-]+)"\)|getElementById\("([a-z0-9-]+)"\)', script)}
+    built = set(re.findall(r'id="([a-z0-9-]+)"', script))  # controls the front end builds itself
+    missing = sorted(i for i in made if i not in ids and i not in built)
+    check("the front end asks for no control that isn't on the page", not missing, str(missing[:8]))
 
 
 def run_checks(app, ports, home, library):
@@ -201,6 +229,7 @@ def run_checks(app, ports, home, library):
     check("status without an endpoint has the same keys as before", set(status) == expected,
           f"extra: {sorted(set(status) - expected)} missing: {sorted(expected - set(status))}")
     check("status without an endpoint has no endpoint section", "endpoint" not in status)
+    check_ui(app)
     code, report = app.post_json("/api/endpoint", {})
     check("GET /api/endpoint works", app.get_json("/api/endpoint")["mode"] == "ollama", f"POST {code}")
 
@@ -309,8 +338,8 @@ def run_checks(app, ports, home, library):
 
     code, report = app.post_json("/api/endpoint", {"url": f"http://127.0.0.1:{ports['broken']}/v1", "model": "mock-model"})
     events = app.chat("mock-model", "How long is food in the fridge safe?", conversation="broken")
-    check("an answer it can't read gives one plain error", "read" in str(next((e for e in events if e["type"] == "error"),
-                                                                             {})).get("message", "").lower(),
+    check("an answer it can't read gives one plain error", "read" in next((e for e in events if e["type"] == "error"),
+                                                                           {}).get("message", "").lower(),
           str([e for e in events if e["type"] == "error"])[:160])
 
     # 7. Switch back to this computer's Ollama, and the setting survives a restart.
@@ -336,7 +365,7 @@ def run_checks(app, ports, home, library):
         e["type"] == "read" for e in events), str(types(events)[:8]))
     check("the key never appears in the app's own log", KEY not in app.read_log() and KEY not in first_log)
 
-    # 8. Stop: a newer question on the same chat cuts the older one short, and the chat keeps working.
+    # 8. Stop: a newer question on the same chat cuts the older one short; a closed connection forgets it.
     app.post_json("/api/endpoint", {"url": f"http://127.0.0.1:{ports['slow']}/v1", "model": "mock-model"})
     slow_events, cutting = [], threading.Thread(target=lambda: slow_events.extend(
         app.chat("mock-model", "Tell me about blackout food safety", conversation="stop")))
@@ -348,10 +377,22 @@ def run_checks(app, ports, home, library):
     check("a new question stops the answer still running", "done" not in types(slow_events) or len(slow_tokens) < 7,
           f"{len(slow_tokens)} pieces arrived before it was cut short")
     check("the new question is answered after cutting one short", "done" in types(events), str(types(events)[:6]))
+
+    # The page's Stop: closing the answer's connection ends the turn, and the chat forgets that question.
+    resp = app.req("POST", "/api/chat", {"model": "mock-model", "message": "Tell me about blackout food safety",
+                                         "conversation": "stopped"})
+    pieces = 0
+    for raw in resp:
+        pieces += 1
+        if pieces >= 4:
+            break
+    resp.close()
+    time.sleep(1.5)  # the server notices when it next tries to write
+    app.chat("mock-model", "What about a closed freezer?", conversation="stopped")
     asked = [r for r in mock_log(ports["slow"]) if r["path"] == "/v1/chat/completions"]
-    check("the cut-short question is not left in the chat", not any(
+    check("a stopped answer is not left in the chat", not any(
         "Tell me about blackout food safety" in str(m.get("content")) for m in asked[-1]["body"]["messages"]),
-          "the retried conversation should not carry the question nobody answered")
+          "the next question's request still carried the question nobody answered")
 
     # 9. Test button: an address is tried without saving it, and says what happened in plain words.
     code, report = app.post_json("/api/endpoint/test", {"url": f"http://127.0.0.1:{ports['tools']}", "key": KEY})
