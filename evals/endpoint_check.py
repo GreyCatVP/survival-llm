@@ -177,7 +177,7 @@ def main():
     home, library = os.path.join(work, "home"), os.path.join(work, "library")
     make_library(library)
     ports = {mode: free_port() for mode in ("tools", "no-tools", "flaky", "deny-key", "broken", "short", "slow",
-                                            "thinking", "quiet", "silent")}
+                                            "thinking", "quiet", "silent", "alt-models")}
     mocks = {mode: serve(port, mode, KEY if mode == "deny-key" else "") for mode, port in ports.items()}
     app = App(home, library, free_port())
     try:
@@ -204,6 +204,10 @@ def check_ui(app):
     check("the page has the source toggle and the endpoint panel", all(i in ids for i in wanted),
           str([i for i in wanted if i not in ids]))
     check("the key box is a password field", 'id="endpoint-key" type="password"' in page)
+    test_fn = script.split("async function testEndpoint")[1].split("\n}")[0]
+    check("Test fills the model dropdown with what the endpoint offered",
+          "function fillModels" in script and "fillModels(out.models)" in test_fn
+          and "fillModels(e.models, e.model)" in script, test_fn[:200])
     check("the page offers both sources in plain words", "On this computer (Ollama)" in page
           and "An endpoint I provide" in page)
     check("there is a model list and a model name you can type", 'id="endpoint-model"' in page
@@ -367,6 +371,14 @@ def run_checks(app, ports, home, library):
     check("an endpoint that never answers is given up on with a plain message", "never answered" in
           error.get("message", "").lower(), error.get("message", "")[:120])
     check("it is given up on in under a minute, not left hanging", took < 60, f"{took:.0f}s")
+
+    # 6e. A server that lists its models the other way round still gets its models into the picker.
+    code, report = app.post_json("/api/endpoint", {"url": f"http://127.0.0.1:{ports['alt-models']}/v1", "model": ""})
+    check("models listed as {\"models\": [{\"name\": ...]} are understood",
+          report["models"] == ["alt-model-a", "alt-model-b"], str(report["models"]))
+    check("and the app picks one of them", report["model"] == "alt-model-a", report["model"])
+    events = app.chat("alt-model-a", "How long is food in the fridge safe?", conversation="alt")
+    check("and that model answers", "done" in types(events), str(types(events)[:6]))
 
     # 7. Switch back to this computer's Ollama, and the setting survives a restart.
     code, report = app.post_json("/api/endpoint", {"mode": "ollama"})

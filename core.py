@@ -138,15 +138,26 @@ def _endpoint_request(path, body=None, stream=False, timeout=20):
 
 
 def endpoint_models():
-    """The model names this endpoint offers (GET /v1/models); None when it did not answer."""
+    """The model names this endpoint offers (GET /v1/models); None when it did not answer. Most servers put them
+    under "data" with an "id", some under "models" with a "name", and a few just list the names."""
     if not ENDPOINT:
         return None
     try:
-        data = _endpoint_request("/models")
+        answer = _endpoint_request("/models")
     except (OSError, ValueError):
         return None
-    items = data.get("data") if isinstance(data, dict) else None
-    return [str(m["id"]) for m in items or [] if isinstance(m, dict) and m.get("id")]
+    if isinstance(answer, dict):
+        items = answer.get("data") or answer.get("models") or []
+    else:
+        items = answer
+    if not isinstance(items, list):
+        return []
+    names = []
+    for item in items:
+        name = item.get("id") or item.get("name") if isinstance(item, dict) else item
+        if isinstance(name, str) and name:
+            names.append(name)
+    return names
 
 
 _endpoint_caps = {}  # model -> what the endpoint just configured can do, asked once per model

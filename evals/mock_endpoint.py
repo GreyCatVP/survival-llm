@@ -16,7 +16,8 @@ Modes:
   thinking  sends its thinking as reasoning deltas first, the way OpenAI-compatible reasoning models do
   quiet     leaves long gaps between pieces, so a test can see the heartbeats
   silent    answers 200 and then never says anything (the app must not hang on it)
-A request for the model "missing-model" gets 404, whatever the mode. with Stop
+A request for the model "missing-model" gets 404, whatever the mode.
+  alt-models  lists its models as {"models": [{"name": ...}]}, which some servers do, and answers text with Stop
 
 GET /_log shows every request it took (path, Authorization header, body), so the tests can check what the
 app asked for and where the key went.
@@ -73,6 +74,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.split("?")[0] == "/v1/models":
             if not self._key_ok():
                 return self._refused("invalid api key")
+            if self.mode == "alt-models":  # some servers answer {"models": [{"name": ...}]} instead
+                return self._json(200, {"models": [{"name": "alt-model-a"}, {"name": "alt-model-b"}]})
             return self._json(200, {"object": "list", "data": MODELS})
         if self.path.split("?")[0] == "/_log":  # for the tests: what the app actually asked for
             return self._json(200, {"requests": list(self.log)})
@@ -181,7 +184,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8123)
     parser.add_argument("--mode", default="tools", choices=["tools", "no-tools", "flaky", "no-calls", "deny-key",
-                                                            "broken", "short", "slow", "thinking", "quiet", "silent"])
+                                                            "broken", "short", "slow", "thinking", "quiet", "silent", "alt-models"])
     parser.add_argument("--key", default="")
     args = parser.parse_args()
     serve(args.port, args.mode, args.key)

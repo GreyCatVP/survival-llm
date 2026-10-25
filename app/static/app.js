@@ -316,6 +316,13 @@ async function loadEndpoint() {
   try { endpoint = await (await api("/api/endpoint")).json(); } catch { /* status says when the app is gone */ }
 }
 
+function fillModels(models, chosen) {  // the dropdown, kept in step with whatever list we last learned
+  const list = models || [];
+  const keep = chosen || list[0] || $("endpoint-model").value;
+  $("endpoint-model").innerHTML = list.map((m) => `<option value="${esc(m)}"${m === keep ? " selected" : ""}>${esc(m)}</option>`).join("")
+    || '<option value="">nothing to choose yet</option>';
+}
+
 function renderEndpoint() {
   const on = endpointMode();
   $("src-ollama").classList.toggle("on", !on);
@@ -327,8 +334,7 @@ function renderEndpoint() {
   if (!typing("endpoint-url")) $("endpoint-url").value = e.url || "";
   if (!typing("endpoint-key")) $("endpoint-key").value = "";  // the app never sends the key back to the page
   $("endpoint-key").placeholder = e.key_set ? `saved (${e.key_masked}) - blank keeps it` : "blank if it needs none";
-  $("endpoint-model").innerHTML = (e.models || []).map((m) => `<option value="${esc(m)}"${m === e.model ? " selected" : ""}>${esc(m)}</option>`).join("")
-    || '<option value="">nothing to choose yet</option>';
+  fillModels(e.models, e.model);
   const listed = (e.models || []).includes(e.model);
   if (!typing("endpoint-custom")) $("endpoint-custom").value = e.model && !listed ? e.model : "";
 }
@@ -366,6 +372,10 @@ async function testEndpoint() {
     if ($("endpoint-key").value.trim()) body.key = $("endpoint-key").value.trim();
     const resp = await api("/api/endpoint/test", { method: "POST", body: JSON.stringify(body) });
     const out = await resp.json();
+    if (out.ok) {  // show what it offered right away, before anything is saved
+      endpoint = { mode: endpointMode() ? "endpoint" : "ollama", ...(endpoint || {}), models: out.models || [] };
+      fillModels(out.models);
+    }
     note.textContent = out.message || (out.ok ? "It answered." : "That address didn't answer.");
   } catch { note.textContent = "Couldn't reach Survival LLM."; }
 }
