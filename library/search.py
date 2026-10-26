@@ -79,17 +79,21 @@ class Library:
         rank = dict(hits)
         marks = ",".join("?" * len(rank))
         info = {r[0]: r for r in self.db.execute(
-            "SELECT p.id, d.id, d.title, s.label, s.topic, d.file_id, p.offset, p.length, s.key "
+            "SELECT p.id, d.id, d.title, s.label, s.topic, d.file_id, p.offset, p.length, s.key, d.offset, d.length "
             f"FROM passages p JOIN docs d ON d.id = p.doc_id JOIN sources s ON s.id = d.source_id "
             f"WHERE p.id IN ({marks})", list(rank))}
         # BM25 ranks are negative (lower is better), so a weight above 1 moves a source up.
         order = sorted(info, key=lambda pid: rank[pid] * AUTHORITY.get(info[pid][8], 1.0))
-        results, seen_docs = [], set()
+        results, seen_docs, shown = [], set(), set()
         for pid in order:
             r = info[pid]
             if r[1] in seen_docs or (topic and topic != "any" and r[4] != topic):
                 continue
             seen_docs.add(r[1])
+            body = self._read_bytes(r[5], r[9], r[10]).split(b"\n\n", 1)[-1]  # the article without its title header
+            if body in shown:  # the same article under another title (iFixit's guides for each model variant)
+                continue
+            shown.add(body)
             text = self._read(r[5], r[6], r[7])
             results.append({"id": pid, "title": r[2], "source": r[3], "official": r[8] in OFFICIAL_LABEL,
                             "snippet": _snippet(text, words)})
