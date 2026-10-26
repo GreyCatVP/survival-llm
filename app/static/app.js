@@ -411,6 +411,7 @@ function newChat() {
   conversation = null;
   for (const m of [...els.messages.querySelectorAll(".msg")]) m.remove();
   els.welcome.hidden = false;
+  if (!els.reader.hidden) hideReader();  // the article belonged to the old chat
 }
 
 function sourceButton(source, how, strong) {
@@ -493,7 +494,7 @@ async function ask(text) {
         meta.classList.add("error");
       } else if (ev.type === "done") {
         answered = true;  // a memory step may still follow
-        answer = ev.answer || answer;
+        answer = ev.unfinished ? ev.answer || "" : ev.answer || answer;  // unfinished: what streamed isn't an answer
         render();
         showSources(sourcesEl, ev);
         const secs = Math.round((Date.now() - started) / 1000);
@@ -990,6 +991,7 @@ async function memoryChangedWhileOpen() {
 }
 
 async function saveMemory(text, done) {
+  $("memory-status").textContent = "Saving…";
   try {
     const resp = await api("/api/memory", { method: "POST", body: JSON.stringify({ text, base: memoryBase }) });
     const m = await resp.json();
@@ -1001,7 +1003,9 @@ async function saveMemory(text, done) {
     const dropped = m.dropped.length ? ` Left out ${n(m.dropped.length)} the AI deleted or changed meanwhile.` : "";
     $("memory-status").textContent = done + kept + dropped;
   } catch (err) {
-    if (!(err instanceof StaleTab)) $("memory-status").textContent = "Couldn't save. Is Survival LLM still running?";
+    $("memory-status").textContent = err instanceof StaleTab
+      ? "Not saved: Survival LLM restarted. Copy your edits, then reload the page."
+      : "Couldn't save. Is Survival LLM still running?";
   }
   memoryCount();
 }
@@ -1017,7 +1021,9 @@ $("memory-clear").onclick = (e) => {
 $("memory-writes").onchange = async (e) => {
   const on = e.target.checked;
   try {
-    const m = await (await api("/api/memory/ai-writes", { method: "POST", body: JSON.stringify({ on }) })).json();
+    const resp = await api("/api/memory/ai-writes", { method: "POST", body: JSON.stringify({ on }) });
+    const m = await resp.json();
+    if (!resp.ok) { e.target.checked = !on; $("memory-status").textContent = m.error || "Couldn't change that."; return; }
     e.target.checked = m.ai_writes;
     $("memory-status").textContent = m.ai_writes ? "The AI can add and change notes again."
       : "The AI won't add or change notes now. It still reads the ones here.";

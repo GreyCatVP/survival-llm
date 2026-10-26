@@ -41,6 +41,15 @@ from library import myfiles  # noqa: E402
 from memory import MAX_CHARS as MEMORY_MAX, Memory, parse as parse_notes, prompt_section, size as notes_size  # noqa: E402
 from library.search import DB_PATH, LIB, TOPICS, Library  # noqa: E402
 
+# Check web certificates the way the computer itself does, with the Mac's Keychain or the Windows certificate store.
+# The bundled Python only knows a fixed list, so behind a company's or an antivirus's own certificate the library,
+# engine and update downloads failed with CERTIFICATE_VERIFY_FAILED while models (Ollama) downloaded fine.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:  # a copy run from source without it
+    pass
+
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 TOKEN = secrets.token_urlsafe(16)
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -106,6 +115,14 @@ MY_DIR = os.environ.get("SURVIVAL_LLM_FILES") or os.path.join(os.path.expanduser
 MY_DB = os.path.join(APP_DIR, "my-files.sqlite")
 # The AI's notes about the person (memory.py), a plain text file they edit in the app, and the app's settings.
 MEMORY = Memory(os.path.join(APP_DIR, "survival-llm-memory.txt"), os.path.join(APP_DIR, "settings.json"))
+def save_failed(exc, path):
+    """What to tell the person when the memory or settings file couldn't be written (it goes to app.log too)."""
+    print(f"Couldn't save {path}: {exc}", file=sys.stderr)
+    if getattr(exc, "errno", None) == errno.ENOSPC:
+        return "Couldn't save: the disk is full. Free some space and try again."
+    if os.name == "nt" and isinstance(exc, PermissionError):  # Windows refuses while another program has it open
+        return f"Couldn't save: another program is using {path}. Close it and try again."
+    return f"Couldn't save {path}: {getattr(exc, 'strerror', None) or exc}."
 MAX_UPLOAD = 4 * 1024 ** 3
 my_files_checked = [0.0]  # when the folder was last looked at
 
@@ -871,7 +888,7 @@ def update_report():
               "download_page": DOWNLOAD_PAGE, "app": None, "library": lib}
     if app:
         report["app"] = {"version": app["version"], "date": app.get("date"), "notes": app.get("notes", []),
-                         "gb": round(app[platform_key()]["bytes"] / 1e9, 2), "blocker": update_blocker()}
+                         "gb": round(app[platform_key()]["bytes"] / 1e9, 3), "blocker": update_blocker()}
     try:
         with open(UPDATE_FAILED, encoding="utf-8-sig") as f:
             report["failed"] = f.read().strip() or "no reason given"
@@ -905,6 +922,10 @@ def app_update_worker(key):
     where = install_location()
     helper = install_mac(zip_path, where) if sys.platform == "darwin" else install_windows(zip_path, where)
     os.remove(zip_path)
+    try:
+        os.rmdir(work)
+    except OSError:
+        pass
     threading.Timer(1.5, restart_into, args=(helper,)).start()  # time for the window to say "Restarting"
 
 
@@ -1143,16 +1164,28 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": f"That's more than memory holds ({MEMORY_MAX:,} characters). Shorten "
                                                  "some notes, or put longer things in Your files."})
             base = body.get("base")
-            notes, kept, dropped = MEMORY.save_text(text, base if isinstance(base, str) else None)
+            try:
+                notes, kept, dropped = MEMORY.save_text(text, base if isinstance(base, str) else None)
+            except OSError as exc:
+                return self._send(500, {"error": save_failed(exc, MEMORY.path)})
             refresh_prompts()
             return self._send(200, {"ok": True, "text": "\n".join(notes), "kept": kept, "dropped": dropped})
         if url.path == "/api/memory/ai-writes":  # the switch: may the AI add and change notes?
-            MEMORY.set_ai_writes(bool(body.get("on")))
+            try:
+                MEMORY.set_ai_writes(bool(body.get("on")))
+            except OSError as exc:
+                return self._send(500, {"error": save_failed(exc, MEMORY.settings_path)})
             refresh_prompts()
             return self._send(200, {"ok": True, "ai_writes": MEMORY.ai_writes})
         if url.path == "/api/memory/undo":  # take back a note the AI just saved, changed or deleted
             note, old = str(body.get("note") or ""), str(body.get("old") or "")
-            done = MEMORY.undo(str(body.get("action") or ""), note, old)
+            at = body.get("at") if isinstance(body.get("at"), int) and not isinstance(body.get("at"), bool) else None
+            try:
+                near = [[str(x) for x in v][:500] if isinstance(v, list) else []
+                        for v in (body.get("before"), body.get("after"))]  # the notes around a deleted one
+                done = MEMORY.undo(str(body.get("action") or ""), note, old, at, *near)
+            except OSError:
+                done = False
             if done and any(n and n in (c.get("messages") or [{}])[0].get("content", "") for n in (note, old)
                             for c in list(conversations.values())):
                 refresh_prompts()  # a chat whose instructions already list the note learns it was taken back

@@ -18,6 +18,7 @@ OLLAMA_VERSION="v0.40.11"
 OLLAMA_URL="https://github.com/ollama/ollama/releases/download/$OLLAMA_VERSION"
 PYWEBVIEW="pywebview==6.2.1"
 PYPDF="pypdf==6.19.0"  # reads the PDFs people add to their own files (pure Python, same for Mac and Windows)
+TRUSTSTORE="truststore==0.10.4"  # checks web certificates with the system's own store (pure Python)
 
 mkdir -p "$CACHE" "$DIST"
 
@@ -52,7 +53,7 @@ RES="$APP/Contents/Resources"
 rm -rf "$DIST/mac"
 mkdir -p "$APP/Contents/MacOS" "$RES"
 tar -xzf "$(fetch_python aarch64-apple-darwin)" -C "$RES"
-"$RES/python/bin/python3" -m pip install -q --no-compile --disable-pip-version-check "$PYWEBVIEW" "$PYPDF"
+"$RES/python/bin/python3" -m pip install -q --no-compile --disable-pip-version-check "$PYWEBVIEW" "$PYPDF" "$TRUSTSTORE"
 rm -rf "$RES/python/lib/python3.12/site-packages/PyObjCTest"  # pyobjc's own test suite
 copy_app "$RES/app"
 clang -O2 -arch arm64 -mmacosx-version-min=14.0 "$HERE/launcher.c" -o "$APP/Contents/MacOS/Survival LLM" \
@@ -94,7 +95,7 @@ tar -xzf "$(fetch_python x86_64-pc-windows-msvc)" -C "$WIN"
 # as source, and it is plain Python, so the copy pip just made for the Mac is reused.
 "$RES/python/bin/python3" -m pip install -q --no-compile --disable-pip-version-check --target "$WIN/python/Lib/site-packages" \
   --platform win_amd64 --python-version 3.12 --implementation cp --only-binary=:all: --no-deps \
-  "$PYWEBVIEW" "$PYPDF" pythonnet==3.2.1 clr_loader==0.3.1 cffi==2.1.1 pycparser bottle typing_extensions
+  "$PYWEBVIEW" "$PYPDF" "$TRUSTSTORE" pythonnet==3.2.1 clr_loader==0.3.1 cffi==2.1.1 pycparser bottle typing_extensions
 cp -R "$RES/python/lib/python3.12/site-packages/proxy_tools" "$WIN/python/Lib/site-packages/"
 copy_app "$WIN/app"
 # Where the app fetches Ollama on first use (checked against Ollama's published checksum).
