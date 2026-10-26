@@ -267,3 +267,15 @@ a:focus-visible, button:focus-visible, select:focus-visible, summary:focus-visib
   .mr-action { width: 100%; text-align: left; }
   .top { gap: 8px; }
 }
+
+/* memory: the AI's notes about the person */
+.switch { display: flex; align-items: center; gap: 8px; margin: 12px 0 10px; font-weight: 600; cursor: pointer; }
+.switch input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+.memory-text { min-height: 40vh; font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+#memory-dialog .prompt-actions { flex-wrap: wrap; }
+#memory-dialog .prompt-actions #memory-count { margin-right: 0; }
+.memory-saved { font-size: 14px; color: var(--muted); margin-top: 8px; overflow-wrap: anywhere; }
+.memory-saved .link { color: var(--text); }
+.memory-saved .link:disabled { opacity: .5; cursor: default; }
+#memory-count.error { color: var(--danger); }
+.memory-checking { font-size: 13px; color: var(--muted); margin-top: 6px; }

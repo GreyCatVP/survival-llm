@@ -441,11 +441,12 @@ async function ask(text) {
   els.welcome.hidden = true;
   addMessage("user", `<div class="bubble">${esc(text)}</div>`);
   const msg = addMessage("assistant", `<details class="how" open><summary>Working on it…</summary><div class="activity"></div></details>
-    <div class="answer cursor"></div><div class="meta"></div><div class="sources"></div>`);
+    <div class="answer cursor"></div><div class="remembered"></div><div class="meta"></div><div class="sources"></div>`);
   const how = msg.querySelector(".how"), summary = how.querySelector("summary"), activity = how.querySelector(".activity");
   const answerEl = msg.querySelector(".answer"), meta = msg.querySelector(".meta"), sourcesEl = msg.querySelector(".sources");
   const started = Date.now();
-  let answer = "", queued = false, steps = 0, failed = false;
+  let answer = "", queued = false, steps = 0, failed = false, answered = false;
+  const remembered = msg.querySelector(".remembered"), changes = [];  // memory changes, announced together at the end
   const tick = setInterval(() => {
     summary.textContent = `${nameOf(model)} is working on it… ${Math.round((Date.now() - started) / 1000)} s`;
   }, 1000);
@@ -472,7 +473,11 @@ async function ask(text) {
     if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || `error ${resp.status}`);
     for await (const ev of events(resp)) {
       if (["search", "read", "show"].includes(ev.type) && answer) { answer = ""; render(); } // text before a lookup is not the answer
-      if (ev.type === "search") note(`Searched the library: “${ev.query}”`);
+      if (ev.type === "memory_check") memoryChecking(msg, true);
+      else if (ev.type === "memory") changes.push(showRemembered(remembered, ev));
+      else if (ev.type === "memory_failed") memoryNote(remembered, "Couldn't update memory this time.");
+      else if (ev.type === "memory_unchanged") memoryNote(remembered, "Memory didn't change. You can edit it yourself:", true);
+      else if (ev.type === "search") note(`Searched the library: “${ev.query}”`);
       else if (ev.type === "read") note(`Read: ${ev.title} · ${ev.source}`, ev.id, "The answer used this part");
       else if (ev.type === "show") {
         note(`Opened for you: ${ev.title}`, ev.id, "The answer pointed here");
@@ -480,11 +485,14 @@ async function ask(text) {
       } else if (ev.type === "token") {
         answer += ev.text;
         if (!queued) { queued = true; requestAnimationFrame(render); }
+      } else if (ev.type === "error" && answered) {
+        memoryNote(remembered, "Couldn't update memory this time.");  // the answer itself is fine
       } else if (ev.type === "error") {
         failed = true;
         meta.textContent = ev.message;
         meta.classList.add("error");
       } else if (ev.type === "done") {
+        answered = true;  // a memory step may still follow
         answer = ev.answer || answer;
         render();
         showSources(sourcesEl, ev);
@@ -500,7 +508,7 @@ async function ask(text) {
           more.type = "button";
           more.className = "ghost keep-going";
           more.textContent = "Keep going";
-          more.onclick = () => { more.remove(); ask("Please continue exactly where you stopped."); };
+          more.onclick = () => { if (busy) return; more.remove(); ask("Please continue exactly where you stopped."); };
           meta.after(more);
         }
         announce(`Answer ready from ${nameOf(model)}.`);
@@ -510,10 +518,15 @@ async function ask(text) {
     failed = true;
     if (err instanceof StaleTab) { /* banner shown */ }
     // Notes go in the meta line: a pending render() would wipe anything added to the answer itself.
-    else if (err.name === "AbortError") meta.textContent = "Stopped.";
+    else if (err.name === "AbortError" && answered) {
+      failed = false;
+      if (remembered.querySelector(".memory-checking")) memoryNote(remembered, "Stopped updating memory. Anything it already saved is in Memory.", true);
+    } else if (err.name === "AbortError") meta.textContent = "Stopped.";
     else { meta.textContent = `Couldn't get an answer: ${err.message || err}`; meta.classList.add("error"); }
   } finally {
     clearInterval(tick);
+    memoryChecking(msg, false);
+    if (changes.length) announce(changes.join(". "));
     summary.textContent = steps ? `How it found this (${steps} step${steps === 1 ? "" : "s"})` : "Details";
     how.open = false;
     if (!steps) how.hidden = true;
@@ -534,11 +547,11 @@ function showSources(el, ev) {
     el.insertAdjacentHTML("beforeend", `<div class="label">Found in the library · click to open</div>`);
     for (const s of seen.slice(0, 5)) el.appendChild(sourceButton(s, "This matched the search", true));
   } else if (state?.library) {
-    el.insertAdjacentHTML("beforeend", `<div class="memory-note">This answer came from the AI's memory, not the library, so there's
-      no source to check. Ask “look that up” to get one.</div>`);
+    el.insertAdjacentHTML("beforeend", `<div class="memory-note">This answer came from what the AI already knows, not the library,
+      so there's no source to check. Ask “look that up” to get one.</div>`);
   } else {
-    el.insertAdjacentHTML("beforeend", `<div class="memory-note">No library installed yet, so this answer came from the AI's memory,
-      with no source to check.</div>`);
+    el.insertAdjacentHTML("beforeend", `<div class="memory-note">No library installed yet, so this answer came from what the AI
+      already knows, with no source to check.</div>`);
   }
   const rest = read.length ? seen : seen.slice(5);
   if (rest.length) {
@@ -551,6 +564,71 @@ function showSources(el, ev) {
     more.appendChild(wrap);
     el.appendChild(more);
   }
+}
+
+// After the answer, the AI takes a moment to update its notes about the person; Send waits for it.
+function memoryChecking(msg, on) {
+  msg.querySelector(".memory-checking")?.remove();
+  if (on) msg.querySelector(".remembered").insertAdjacentHTML("beforeend", `<div class="memory-checking">Updating memory…</div>`);
+}
+
+function seeMemoryButton() {
+  const see = document.createElement("button");
+  see.type = "button";
+  see.className = "link";
+  see.textContent = "See memory";
+  see.onclick = () => openMemory();
+  return see;
+}
+
+// A short line about the memory step under the answer (it failed, or was stopped), optionally with See memory.
+function memoryNote(el, text, withLink = false) {
+  const row = document.createElement("div");
+  row.className = "memory-saved";
+  row.append(text);
+  if (withLink) row.append(" ", seeMemoryButton());
+  el.appendChild(row);
+}
+
+// A note the AI saved, changed or deleted after answering, with Undo and a way to see all of them. Returns its text.
+function showRemembered(el, ev) {
+  if (memoryDialog.open) memoryChangedWhileOpen();
+  const row = document.createElement("div");
+  row.className = "memory-saved";
+  const text = document.createElement("span");
+  const said = { add: `Remembered: “${ev.note}”`, change: `Updated a memory: “${ev.note}”`, delete: `Forgot: “${ev.old}”`,
+                 full: `Memory is full, so it didn't save “${ev.note}”. Delete notes you don't need in Memory.` };
+  text.textContent = said[ev.action] || "Changed its memory";
+  if (ev.action === "full") {
+    row.append(text, " ", seeMemoryButton());
+    el.appendChild(row);
+    return text.textContent;
+  }
+  const sep = document.createTextNode(" · ");
+  const undo = document.createElement("button");
+  undo.type = "button";
+  undo.className = "link";
+  undo.textContent = "Undo";
+  undo.onclick = async () => {
+    undo.disabled = true;
+    try {
+      const resp = await api("/api/memory/undo", { method: "POST", body: JSON.stringify(ev) });
+      if (!resp.ok) throw new Error();
+      text.textContent = { add: `Undone: it won't remember “${ev.note}”`, change: `Undone: back to “${ev.old}”`,
+                           delete: `Undone: it remembers “${ev.old}” again` }[ev.action];
+      undo.remove();
+      sep.remove();
+    } catch (err) {
+      if (!(err instanceof StaleTab)) {
+        text.textContent = `${said[ev.action]}. Couldn't undo it here, maybe because the note was edited since; change it in Memory.`;
+        undo.remove();
+        sep.remove();
+      } else undo.disabled = false;
+    }
+  };
+  row.append(text, sep, undo, " · ", seeMemoryButton());
+  el.appendChild(row);
+  return text.textContent;
 }
 
 // ---------- reader ----------
@@ -866,6 +944,88 @@ $("close-updates").onclick = () => updatesDialog.close();
 updatesDialog.onclick = (e) => { if (e.target === updatesDialog) updatesDialog.close(); };
 $("banner-update").onclick = () => openUpdates(false);
 $("banner-dismiss").onclick = () => { remember("update-dismissed", state?.update?.app || ""); $("update-banner").hidden = true; };
+
+// ---------- memory: the AI's notes about the person, viewable and editable ----------
+const memoryDialog = $("memory-dialog");
+let memoryBase = "", memoryMax = 6000;  // memoryBase: the notes as last loaded or saved
+const noteLines = (text) => text.split("\n").map((l) => l.trim()).filter(Boolean);
+
+function memoryCount() {
+  const lines = noteLines($("memory-text").value);
+  const chars = lines.reduce((n, l) => n + l.length + 1, 0);
+  const over = chars > memoryMax;
+  $("memory-count").textContent = lines.length
+    ? `${lines.length} note${lines.length === 1 ? "" : "s"} · ${chars.toLocaleString()} of ${memoryMax.toLocaleString()} characters`
+    : "";
+  $("memory-count").classList.toggle("error", over);
+  $("memory-save").disabled = over;
+}
+
+// Edits not yet saved are kept when the window closes, and are there again when it reopens.
+const memoryEdited = () => $("memory-text").value.trim() !== memoryBase.trim();
+
+async function openMemory() {
+  $("memory-status").textContent = "";
+  try {
+    const m = await (await api("/api/memory")).json();
+    memoryMax = m.max_chars;
+    $("memory-writes").checked = m.ai_writes;
+    if (memoryEdited()) {
+      $("memory-status").textContent = "These are your unsaved changes. Save keeps them, along with anything the AI changed since.";
+    } else {
+      memoryBase = m.text;
+      $("memory-text").value = m.text;
+    }
+  } catch (err) {
+    if (!(err instanceof StaleTab)) $("memory-status").textContent = "Couldn't load the memory.";
+  }
+  memoryCount();
+  if (!memoryDialog.open) memoryDialog.showModal();
+}
+
+// The AI changed its notes while the window is open: show them if nothing was edited, else say Save will merge.
+async function memoryChangedWhileOpen() {
+  if (!memoryEdited()) return openMemory();
+  $("memory-status").textContent = "The AI just changed its notes. Save keeps your edits and its changes.";
+}
+
+async function saveMemory(text, done) {
+  try {
+    const resp = await api("/api/memory", { method: "POST", body: JSON.stringify({ text, base: memoryBase }) });
+    const m = await resp.json();
+    if (!resp.ok) { $("memory-status").textContent = m.error || "Couldn't save."; return; }
+    memoryBase = m.text;
+    $("memory-text").value = m.text;
+    const n = (k) => (k === 1 ? "a note" : `${k} notes`);
+    const kept = m.kept.length ? ` Also kept ${n(m.kept.length)} the AI saved while you were editing.` : "";
+    const dropped = m.dropped.length ? ` Left out ${n(m.dropped.length)} the AI deleted or changed meanwhile.` : "";
+    $("memory-status").textContent = done + kept + dropped;
+  } catch (err) {
+    if (!(err instanceof StaleTab)) $("memory-status").textContent = "Couldn't save. Is Survival LLM still running?";
+  }
+  memoryCount();
+}
+
+$("memory-btn").onclick = openMemory;
+$("close-memory").onclick = () => memoryDialog.close();
+$("memory-text").oninput = memoryCount;
+$("memory-save").onclick = () => saveMemory($("memory-text").value, "Saved. Used from your next question.");
+$("memory-clear").onclick = (e) => {
+  if (!confirmClick(e.currentTarget, "Click again to delete every note")) return;
+  saveMemory("", "Deleted all notes.");
+};
+$("memory-writes").onchange = async (e) => {
+  const on = e.target.checked;
+  try {
+    const m = await (await api("/api/memory/ai-writes", { method: "POST", body: JSON.stringify({ on }) })).json();
+    e.target.checked = m.ai_writes;
+    $("memory-status").textContent = m.ai_writes ? "The AI can add and change notes again."
+      : "The AI won't add or change notes now. It still reads the ones here.";
+  } catch (err) {
+    e.target.checked = !on;
+    if (!(err instanceof StaleTab)) $("memory-status").textContent = "Couldn't change that. Is Survival LLM still running?";
+  }
+};
 
 // ---------- the AI's instructions, viewable and editable ----------
 let promptDefault = "";

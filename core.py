@@ -33,7 +33,7 @@ How to answer:
 - Put safety first. Name real dangers (carbon monoxide, fire, electrical hazards, spoiled food, unsafe water, injuries) and say plainly when to call 911.
 - Carbon monoxide kills people in every blackout. Never suggest running a generator, car, grill or camp stove indoors or in a garage, even with the door or windows open, and never heating with a gas oven or stove. Heaters must be made for indoor use, with a working CO alarm. Give no "if you must" exceptions to these.
 - Always answer. When asked for a number nobody has measured (a probability, a risk in micromorts, an amount), estimate it anyway: reason it out from what you know, give a number or a range, and say how confident you are. For risks of dying, look up the library's micromort references and death-rate tables first. Missing data is never a reason to withhold a number. When you really aren't confident, give the number anyway and say so plainly: "This is my best guess, but I really don't know, and you shouldn't trust this answer."
-- When you can't back an answer with the library, answer anyway from what you know, or make something up if you have to, as long as you say so plainly ("From memory:" or "I'm guessing here:"). Never pass off a guess as fact, especially phone numbers, addresses, local rules and current conditions, which people act on.
+- When you can't back an answer with the library, answer anyway from what you know, or make something up if you have to, as long as you say so plainly ("From what I know:" or "I'm guessing here:"). Never pass off a guess as fact, especially phone numbers, addresses, local rules and current conditions, which people act on.
 - Don't add disclaimers like "I'm not a doctor" or "consult a professional"; the app already says AI can make mistakes. Do say when someone needs emergency help now.{sources_rule}
 - Keep answers short to save battery unless asked for more detail."""
 
@@ -128,12 +128,12 @@ def system_prompt(library, tools=True):
                         "wikiHow and Q&A sites.",
             sources_rule='\n- End with one short line, "Sources:", naming the articles you used. The app also shows the '
                          "person every article you opened, so name only articles you actually read, and never make one "
-                         'up. If you answered from memory, write "Sources: none (from memory)".')
+                         'up. If you answered from what you already know, write "Sources: none (from my own knowledge)".')
     if has_library:
         return BASE_PROMPT + RULES.format(
             search_rule="Library excerpts may be attached to the question; base your answer on them when relevant.",
-            sources_rule='\n- End with one short line, "Sources:", naming the excerpts you used, or "Sources: none (from '
-                         'memory)" if none of them helped. The person sees the excerpts too, so never name anything else.')
+            sources_rule='\n- End with one short line, "Sources:", naming the excerpts you used, or "Sources: none (from my '
+                         'own knowledge)" if none of them helped. The person sees the excerpts too, so never name anything else.')
     return BASE_PROMPT + RULES.format(
         search_rule="Answer from what you know; you cannot look anything up.",
         sources_rule="\n- Do not cite sources you cannot check.")
@@ -197,12 +197,43 @@ LIST_ITEM = re.compile(r"\s*([-*•]|\d+[.)])\s")
 # round with yet another lookup written out as text, and the person gets no answer at all.
 FINAL_NUDGE = ("(Note from the app, not the person: you have used all your library lookups. Answer the question "
                "now from what you already read, and list your sources. Do not call any more tools.)")
+# After an answer, the model gets one short request of its own to update its notes about the person (memory.py).
+# Asked while answering, models put the question first and rarely saved anything; asked for tool calls after the
+# answer, Nemotron Super said "nothing to save" about "I have type 1 diabetes"; given the whole chat, Lightning lost
+# such facts among the library results. A short request with just what the person said, answered in JSON, worked
+# best for every model, and Ollama still has the chat cached for the next question.
+MEMORY_CHECK = """You keep short notes about the person using Survival LLM, an offline assistant app, so it knows them in later chats. Your notes now:
+{notes}
+
+{earlier}Their last message: "{said}"
+
+Save only what they said in their last message about themselves or their household that will still be true in later chats and isn't in your notes yet: who lives with them and their ages, health conditions, medicines, allergies, pregnancy, pets, their equipment, where they live, what one of their files is or how much it matters, how they like answers. Don't save their question, what is happening today (a power cut, today's symptoms), facts from a library, or guesses.
+
+Reply with only a JSON object:
+{"forget": [notes to delete because they asked you to forget them, as written in your notes],
+ "change": [{"old": a note as written in your notes, "new": how it should read now}, for facts that changed],
+ "remember": [new facts, one per note]}
+Use empty lists when there is nothing to do.
+
+Examples:
+- "My daughter Maya is 7 and allergic to penicillin. She has an earache tonight." gives {"forget": [], "change": [], "remember": ["Daughter Maya (7) is allergic to penicillin."]} (the earache passes, so it's left out).
+- "I'm on blood thinners. Can I take ibuprofen for my back?" gives {"forget": [], "change": [], "remember": ["Takes blood thinners."]} (a fact mentioned on the way to a question still counts).
+- "Please forget where I live." with the note "Lives in Austin, Texas." gives {"forget": ["Lives in Austin, Texas."], "change": [], "remember": []}
+- "I sold the Honda generator and got a Champion 4500." with the note "Has a Honda EU2200i generator." gives {"forget": [], "change": [{"old": "Has a Honda EU2200i generator.", "new": "Has a Champion 4500 generator."}], "remember": []}
+- "The power went out. How long is my fridge safe?" gives {"forget": [], "change": [], "remember": []}"""
+ASKED = re.compile(r"\b(remember|forget)\b", re.I)  # the person asked about memory itself
+PERSONAL = re.compile(r"\b(i|i'm|im|i've|ive|i'd|my|me|mine|myself|we|we're|we've|our|ours|us|forget|remember|remind|"
+                      r"daughter|son|wife|husband|partner|kids?|child|children|baby|mom|dad|mother|father|grand\w+|"
+                      r"family|household|roommates?)\b", re.I)
 
 
-def chat_events(model, library, messages, deep=False, caps=None, length="normal"):
-    """Answer the last user message. Yields thinking/search/read/show/token/tick/done events."""
+def chat_events(model, library, messages, deep=False, caps=None, length="normal", memory=None):
+    """Answer the last user message. Yields thinking/search/read/show/token/tick/done events, then, with a memory
+    the person lets the AI write to, memory_check and memory events from a short step after the answer."""
     caps = capabilities(model) if caps is None else caps
-    tools = TOOLS if (library and "tools" in caps) else None
+    can_call = "tools" in caps
+    tools = TOOLS if (library and can_call) else None
+    question = messages[-1]["content"]
     think = think_setting(model, caps, deep)
     limit = LENGTH_LIMITS.get(length, LENGTH_LIMITS["normal"])
     options = {"num_ctx": 32768, "num_predict": limit * 2 if deep and limit > 0 else limit,
@@ -210,7 +241,7 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
     sources, seen, tokens, seconds, cut_off, looked, unopened, named = {}, {}, 0, 0.0, False, False, [], None
     earlier = any(m.get("role") == "tool" for m in messages)  # lookups from earlier questions in this chat
     read_before = _read_earlier(messages)
-    if library and not tools:
+    if library and not can_call:
         for event in attach_excerpts(library, messages):
             sources.setdefault(event["id"], {k: event.get(k) for k in ("title", "source", "official")})
             yield event
@@ -287,7 +318,7 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
         elif earlier:
             line = "Sources: what it read earlier in this chat"
         else:
-            line = "Sources: none (from memory)"
+            line = "Sources: none (from its own knowledge)"
         # Articles it only saw in search results count too: they exist, and it saw their excerpts.
         shown = read_before + [{"id": k, **v} for k, v in seen.items()]
         named = cited_sources(answer)
@@ -297,6 +328,62 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
     yield {"type": "done", "tokens": tokens, "seconds": seconds, "answer": answer, "cut_off": cut_off,
            "unfinished": unfinished, "unopened": unopened, "named": named if library and not unfinished else None,
            "sources": read, "seen": found[len(read):]}
+    # Only when they said something about themselves or their family (or "remember"/"forget"): the step takes a few
+    # seconds. Not after an answer cut off at the length limit, which "Keep going" continues.
+    if memory is not None and memory.ai_writes and not unfinished and not cut_off and PERSONAL.search(question):
+        try:
+            yield from memory_check(model, messages, memory, think_setting(model, caps), options)
+        except Exception:  # noqa: BLE001 - the answer is out; a failed memory step only means nothing new was saved
+            yield {"type": "memory_failed"}
+
+
+def memory_check(model, messages, memory, think, options):
+    """Let the model save, change or delete notes about the person, from what they just said (and, for context, a
+    few of their earlier messages in this chat)."""
+    said = [m["content"].split("\n\nLibrary excerpts:", 1)[0]  # models without tools get excerpts added to questions
+            for m in messages if m.get("role") == "user"]
+    notes = "\n".join(f"- {n}" for n in memory.notes()) or "(none yet)"
+    earlier = "".join(f'Earlier in this chat they said: "{m[:300]}"\n' for m in said[-4:-1])
+    fill = {"notes": notes, "earlier": earlier + ("\n" if earlier else ""), "said": said[-1] if said else ""}
+    prompt = re.sub(r"\{(notes|earlier|said)\}", lambda m: fill[m.group(1)], MEMORY_CHECK)  # one pass: notes may hold braces
+    yield {"type": "memory_check"}
+    reply = []
+    # The same num_ctx as the answer: a different one would make Ollama load the model again.
+    for chunk in _stream(model, [{"role": "user", "content": prompt}], None, think,
+                         {**options, "num_predict": 600, "temperature": 0.3}):
+        reply.append(chunk.get("message", {}).get("content") or "")
+        yield {"type": "tick"}
+    changed = False
+    for event in memory.apply(memory_plan("".join(reply))):
+        changed = True
+        yield event
+    if not changed and ASKED.search(said[-1] if said else ""):
+        yield {"type": "memory_unchanged"}  # they asked it to remember or forget something, and nothing changed
+
+
+def memory_plan(reply):
+    """The model's JSON reply as {"forget": [...], "change": [{"old", "new"}], "remember": [...]}; empty if unreadable.
+    Takes the first JSON object in the reply that has any of those keys, and a single item where a list belongs."""
+    plan, decoder = {}, json.JSONDecoder()
+    for i, ch in enumerate(reply):
+        if ch != "{":
+            continue
+        try:
+            found = decoder.raw_decode(reply, i)[0]
+        except ValueError:
+            continue
+        if isinstance(found, dict) and {"forget", "change", "remember"} & set(found):
+            plan = found
+            break
+
+    def items(key):
+        value = plan.get(key)
+        return value if isinstance(value, list) else [value] if isinstance(value, (str, dict)) else []
+
+    texts = lambda key: [x for x in items(key) if isinstance(x, str) and x.strip()]  # noqa: E731
+    return {"forget": texts("forget"), "remember": texts("remember"),
+            "change": [c for c in items("change") if isinstance(c, dict)
+                       and isinstance(c.get("old"), str) and isinstance(c.get("new"), str)]}
 
 
 def _sources_block(answer):

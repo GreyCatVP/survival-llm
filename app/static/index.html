@@ -17,6 +17,7 @@
     </button>
     <button id="library-btn" class="ghost" type="button">Search library</button>
     <button id="files-btn" class="ghost" type="button" title="Add your own documents for the AI to search">Your files</button>
+    <button id="memory-btn" class="ghost" type="button" title="See and edit what the AI remembers about you">Memory</button>
     <button id="prompt-btn" class="ghost" type="button" title="See and edit the instructions the AI follows">Instructions</button>
     <button id="new-chat" class="ghost" type="button">New chat</button>
     <button id="quit" class="ghost" type="button" title="Stop Survival LLM">Quit</button>
@@ -36,7 +37,8 @@
         <h1>Ask anything. No internet needed.</h1>
         <p>A local AI looks things up in an offline library of medical, emergency, how-to and encyclopedia
           articles, then tells you where each answer came from. Click a source to read it yourself. Add your own
-          documents with <strong>Your files</strong> at the top, and it searches those too.</p>
+          documents with <strong>Your files</strong> at the top, and it searches those too. It remembers what you tell it
+          about yourself between chats; see and edit that in <strong>Memory</strong>.</p>
         <p class="using" id="using" hidden></p>
         <div class="examples">
           <button type="button" class="example">The power is out. How long is the food in my fridge safe?</button>
@@ -91,7 +93,8 @@
     <button id="close-prompt" class="ghost icon" type="button" aria-label="Close">✕</button>
   </div>
   <p class="meta">Survival LLM gives the AI these instructions at the start of every conversation. Change them to change
-    how it answers. Your version applies to every model, from your next question; Reset brings back the original.</p>
+    how it answers. Your version applies to every model, from your next question; Reset brings back the original.
+    After these, the app adds today's date, the names of your files and the AI's notes about you (see Memory).</p>
   <textarea id="prompt-text" class="prompt-text" spellcheck="false" aria-label="AI instructions"></textarea>
   <div class="prompt-actions">
     <span id="prompt-status" class="meta" aria-live="polite"></span>
@@ -124,6 +127,24 @@
   <div class="files-foot">
     <span id="files-folder" class="meta"></span>
     <button id="open-folder" class="ghost" type="button">Open the folder</button>
+  </div>
+</dialog>
+<dialog id="memory-dialog" class="dialog wide" aria-labelledby="memory-title">
+  <div class="dialog-head">
+    <h2 id="memory-title">Memory</h2>
+    <button id="close-memory" class="ghost icon" type="button" aria-label="Close">✕</button>
+  </div>
+  <p class="meta">What the AI remembers about you between chats: who's in your household, health and medicines, your
+    equipment, what your files are. It reads these at the start of every chat. Edit them here, one note per line.
+    They stay on this computer.</p>
+  <label class="switch"><input type="checkbox" id="memory-writes"> Let the AI add and change notes</label>
+  <textarea id="memory-text" class="prompt-text memory-text" spellcheck="true" aria-label="Memory notes, one per line"
+    aria-describedby="memory-count" placeholder="Nothing yet. Notes appear here as the AI learns about you, or write your own, one per line. For example: My son Leo (9) has type 1 diabetes."></textarea>
+  <div class="prompt-actions">
+    <span id="memory-status" class="meta" aria-live="polite"></span>
+    <span id="memory-count" class="meta"></span>
+    <button id="memory-clear" class="ghost" type="button">Delete all</button>
+    <button id="memory-save" class="primary" type="button">Save</button>
   </div>
 </dialog>
 <dialog id="updates-dialog" class="dialog" aria-labelledby="updates-title">

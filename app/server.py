@@ -8,6 +8,7 @@ import atexit
 import base64
 import bisect
 import ctypes
+import datetime
 import errno
 import filecmp
 import hashlib
@@ -37,6 +38,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from core import HOST, capabilities, chat_events, installed_models, system_prompt, trim  # noqa: E402
 from library import myfiles  # noqa: E402
+from memory import MAX_CHARS as MEMORY_MAX, Memory, parse as parse_notes, prompt_section, size as notes_size  # noqa: E402
 from library.search import DB_PATH, LIB, TOPICS, Library  # noqa: E402
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -102,6 +104,8 @@ CUSTOM_PROMPT = os.path.join(APP_DIR, "instructions.txt")  # the person's own ed
 # pack replaces that folder), and its index, kept with the settings.
 MY_DIR = os.environ.get("SURVIVAL_LLM_FILES") or os.path.join(os.path.expanduser("~"), "Survival LLM Files")
 MY_DB = os.path.join(APP_DIR, "my-files.sqlite")
+# The AI's notes about the person (memory.py), a plain text file they edit in the app, and the app's settings.
+MEMORY = Memory(os.path.join(APP_DIR, "survival-llm-memory.txt"), os.path.join(APP_DIR, "settings.json"))
 MAX_UPLOAD = 4 * 1024 ** 3
 my_files_checked = [0.0]  # when the folder was last looked at
 
@@ -190,6 +194,13 @@ def sync_my_files():
     if not myfiles.sync(MY_DIR, MY_DB):
         return
     lib_version[0] += 1
+    refresh_prompts()
+
+
+def refresh_prompts():
+    """Rebuild the instructions of open chats after the person changes them, their memory or their files; they apply
+    from the next question. (Notes the AI saves itself don't do this: it knows them already, and changing the start
+    of a chat makes the model read the whole chat again.)"""
     for conv in list(conversations.values()):
         if conv.get("messages") and conv.get("model"):
             conv["messages"][0]["content"] = prompt_for(model_caps(conv["model"]))
@@ -1055,6 +1066,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200 if doc else 404, doc or {"error": "not found"})
         if url.path == "/api/prompt":
             return self._send(200, {"default": system_prompt(library(), True), "custom": custom_prompt()})
+        if url.path == "/api/memory":
+            return self._send(200, {"text": "\n".join(MEMORY.notes()), "ai_writes": MEMORY.ai_writes,
+                                    "max_chars": MEMORY_MAX})
         if url.path == "/api/myfiles":  # their files, and whether any are being read (?check=1: look for changes)
             if query.get("check"):
                 check_my_files()
@@ -1121,10 +1135,28 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(text + "\n")
             elif os.path.exists(CUSTOM_PROMPT):
                 os.remove(CUSTOM_PROMPT)
-            for conv in conversations.values():  # takes effect in open chats too, from the next question
-                if conv.get("messages"):
-                    conv["messages"][0]["content"] = prompt_for(model_caps(conv["model"]))
+            refresh_prompts()  # takes effect in open chats too, from the next question
             return self._send(200, {"ok": True, "custom": custom_prompt()})
+        if url.path == "/api/memory":  # save the person's version of the notes; base: the text they started from
+            text = str(body.get("text") or "")
+            if notes_size(parse_notes(text)) > MEMORY_MAX:
+                return self._send(400, {"error": f"That's more than memory holds ({MEMORY_MAX:,} characters). Shorten "
+                                                 "some notes, or put longer things in Your files."})
+            base = body.get("base")
+            notes, kept, dropped = MEMORY.save_text(text, base if isinstance(base, str) else None)
+            refresh_prompts()
+            return self._send(200, {"ok": True, "text": "\n".join(notes), "kept": kept, "dropped": dropped})
+        if url.path == "/api/memory/ai-writes":  # the switch: may the AI add and change notes?
+            MEMORY.set_ai_writes(bool(body.get("on")))
+            refresh_prompts()
+            return self._send(200, {"ok": True, "ai_writes": MEMORY.ai_writes})
+        if url.path == "/api/memory/undo":  # take back a note the AI just saved, changed or deleted
+            note, old = str(body.get("note") or ""), str(body.get("old") or "")
+            done = MEMORY.undo(str(body.get("action") or ""), note, old)
+            if done and any(n and n in (c.get("messages") or [{}])[0].get("content", "") for n in (note, old)
+                            for c in list(conversations.values())):
+                refresh_prompts()  # a chat whose instructions already list the note learns it was taken back
+            return self._send(200 if done else 409, {"ok": done})
         if url.path == "/api/myfiles/remove":
             path = my_file_path(body.get("name", ""))
             if not path:
@@ -1258,8 +1290,8 @@ class Handler(BaseHTTPRequestHandler):
         trim(messages)
         self._stream_start()
         events = chat_events(model, library(), messages, deep=bool(body.get("deep")), caps=caps,
-                             length=str(body.get("length") or "normal"))
-        finished, last_tick = False, 0.0
+                             length=str(body.get("length") or "normal"), memory=MEMORY)
+        answered, last_tick = False, 0.0  # answered: the answer went out (a memory step may follow it)
         try:
             for event in events:
                 if conv["run"] != run:
@@ -1271,7 +1303,7 @@ class Handler(BaseHTTPRequestHandler):
                         self.wfile.flush()
                     continue
                 self._event(event)
-            finished = conv["run"] == run
+                answered = answered or (event["type"] == "done" and conv["run"] == run)
         except (BrokenPipeError, ConnectionResetError):
             pass  # stopped, or the page was closed
         except Exception as exc:
@@ -1281,7 +1313,7 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         finally:
             events.close()  # closes the request to Ollama, which stops generating
-            if not finished and conv["run"] == run:
+            if not answered and conv["run"] == run:
                 del messages[keep:]  # forget the unanswered question so the next one starts clean
 
 
@@ -1294,8 +1326,12 @@ def custom_prompt():
 
 
 def prompt_for(caps):
-    """The instructions a conversation starts with: the person's edited version, or the default for this model."""
-    return custom_prompt() or system_prompt(library(), "tools" in caps)
+    """The instructions a conversation starts with: the person's edited version, or the default for this model, then
+    today's date, the names of their files and the AI's memory notes (memory.py)."""
+    tools = "tools" in caps
+    files = [(it["name"], it["title"]) for it in myfiles.items(MY_DB) if it["status"] == "ready"]
+    extra = prompt_section(MEMORY.notes(), MEMORY.ai_writes, files, datetime.date.today())
+    return (custom_prompt() or system_prompt(library(), tools)) + (f"\n\n{extra}" if extra else "")
 
 
 def open_window(url):

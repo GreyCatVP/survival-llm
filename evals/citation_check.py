@@ -38,8 +38,9 @@ QUESTIONS = [
     "What does the Berkeley city ordinance say about running a generator at night?",
     "Who won the 2026 World Cup?",
 ]
-MEMORY_WORDS = re.compile(r"from memory|guess|not in the library|couldn't find|could not find|don't know|"
-                          r"not sure|no (relevant )?(results|information)|library (doesn't|does not)", re.I)
+MEMORY_WORDS = re.compile(r"from memory|from what i know|own knowledge|guess|not in the library|couldn't find|"
+                          r"could not find|don't know|not sure|no (relevant )?(results|information)|"
+                          r"library (doesn't|does not)", re.I)
 
 
 def body(answer):

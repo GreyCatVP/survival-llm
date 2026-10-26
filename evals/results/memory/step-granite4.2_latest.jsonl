@@ -1,0 +1,9 @@
+{"id": "diabetes", "ok": true, "notes": ["Takes insulin for type 1 diabetes."], "events": [{"type": "memory", "action": "add", "note": "Takes insulin for type 1 diabetes."}], "secs": 1.0}
+{"id": "condition-long", "ok": true, "notes": ["7 months pregnant"], "events": [{"type": "memory", "action": "add", "note": "7 months pregnant"}], "secs": 0.9}
+{"id": "two-facts", "ok": false, "notes": [], "events": [], "secs": 1.1}
+{"id": "forget", "ok": true, "notes": ["Has two cats."], "events": [{"type": "memory", "action": "delete", "old": "Lives in Oakland, California."}], "secs": 1.0}
+{"id": "oneoff", "ok": true, "notes": ["Has two cats."], "events": [], "secs": 0.8}
+{"id": "no-repeat", "ok": true, "notes": ["Daughter Maya (7) is allergic to penicillin."], "events": [], "secs": 1.1}
+{"id": "update", "ok": true, "notes": ["Has a Champion 4500 dual fuel generator."], "events": [{"type": "memory", "action": "change", "note": "Has a Champion 4500 dual fuel generator.", "old": "Has a Honda EU2200i generator."}], "secs": 1.3}
+{"id": "file-matters", "ok": true, "notes": ["The EU2200i manual in my files is for the generator I actually own, so trust it over general advice."], "events": [{"type": "memory", "action": "add", "note": "The EU2200i manual in my files is for the generator I actually own, so trust it over general advice."}], "secs": 1.3}
+{"id": "preference", "ok": false, "notes": [], "events": [], "secs": 1.0}

@@ -1,14 +1,18 @@
 """Retrieval test: ask a model 22 blackout / first-aid questions with the library and grade the answers.
 
-Usage: .venv/bin/python evals/retrieval_eval.py [--rest SECONDS] MODEL [MODEL ...]
+Usage: .venv/bin/python evals/retrieval_eval.py [--rest SECONDS] [--memory] MODEL [MODEL ...]
 An interrupted run picks up where it stopped. --rest pauses between questions so the fans stay quieter.
+--memory runs with the app's memory on (empty notes, saving allowed) and counts notes saved; answers go to
+evals/results/with-memory/ instead.
 Grades each answer against facts from official guidance (USDA, CDC, FEMA, WHO, NHS), and records
 whether the model searched, read a relevant article and cited it. Answers go to evals/results/.
 """
+import datetime
 import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.request
 
@@ -16,6 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from core import HOST, capabilities, chat_events, system_prompt  # noqa: E402
 from library.search import Library  # noqa: E402
+from memory import Memory, prompt_section  # noqa: E402
 
 # q: question. must: regexes the answer must match (official facts). about: regex a relevant
 # source title should match, to check the model actually found the right material.
@@ -108,9 +113,10 @@ def warm_up(model):
 def run(model):
     library, caps = Library(), capabilities(model)
     load = warm_up(model)
-    out_dir = os.path.join(ROOT, "evals", "results")
+    out_dir = os.path.join(ROOT, "evals", "results", *(["with-memory"] if MEMORY else []))
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, model.replace(":", "_").replace("/", "_") + ".jsonl")
+    tmp = tempfile.TemporaryDirectory() if MEMORY else None
     saved = {}
     if os.path.exists(path):  # finish an interrupted run instead of starting over
         saved = {r["q"]: r for r in map(json.loads, open(path))}
@@ -128,11 +134,14 @@ def run(model):
                 continue
             if rows and REST:
                 time.sleep(REST)  # let the chip cool between answers (quieter fans, slower run)
-            messages = [{"role": "system", "content": system_prompt(library, "tools" in caps)},
-                        {"role": "user", "content": item["q"]}]
+            prompt, memory = system_prompt(library, "tools" in caps), None
+            if MEMORY:  # every question starts from empty notes
+                memory = Memory(os.path.join(tmp.name, f"memory-{len(rows)}.txt"), os.path.join(tmp.name, "settings.json"))
+                prompt += "\n\n" + prompt_section([], True, (), datetime.date.today())
+            messages = [{"role": "system", "content": prompt}, {"role": "user", "content": item["q"]}]
             events, start, done = [], time.time(), {}
             try:
-                for ev in chat_events(model, library, messages, caps=caps):
+                for ev in chat_events(model, library, messages, caps=caps, memory=memory):
                     if ev["type"] == "done":
                         done = ev
                     elif ev["type"] not in ("token", "tick"):
@@ -155,6 +164,7 @@ def run(model):
         "all_facts": sum(r["facts"] == 1 for r in rows),
         "searched": sum(r["searched"] for r in rows), "read": sum(r["read"] for r in rows),
         "relevant": sum(r["relevant"] for r in rows), "cited": sum(r["cited"] for r in rows),
+        "notes_saved": sum(sum(e["type"] == "memory" for e in r["events"]) for r in rows), "memory": MEMORY,
         "avg_secs": round(sum(r["secs"] for r in rows) / n, 1), "tok_s": round(tok / gen, 1), "n": n,
     }
     with open(os.path.join(out_dir, "summary.jsonl"), "a") as f:
@@ -171,7 +181,7 @@ def run(model):
 
 def regrade():
     """Re-score saved answers with the current grader (no model calls)."""
-    out_dir = os.path.join(ROOT, "evals", "results")
+    out_dir = os.path.join(ROOT, "evals", "results", *(["with-memory"] if MEMORY else []))
     by_q = {item["q"]: item for item in QUESTIONS}
     for name in sorted(os.listdir(out_dir)):
         if not name.endswith(".jsonl") or name == "summary.jsonl":
@@ -188,6 +198,7 @@ def regrade():
 
 
 REST = 0  # seconds to pause between questions; set with --rest N
+MEMORY = False  # --memory
 
 
 if __name__ == "__main__":
@@ -196,6 +207,9 @@ if __name__ == "__main__":
         i = args.index("--rest")
         REST = float(args[i + 1])
         del args[i:i + 2]
+    if "--memory" in args:
+        MEMORY = True
+        args.remove("--memory")
     if args == ["--regrade"]:
         regrade()
     for m in (a for a in args if a != "--regrade"):
