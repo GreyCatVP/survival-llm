@@ -121,18 +121,22 @@ your question ─► local model (Ollama) ─► search_library ─► SQLite fu
 - `library/search.py` searches `index.sqlite` (FTS5, BM25 ranking over ~1,500-character passages, official sources ranked higher) and reads the plain-text Markdown shards.
 - `memory.py` keeps the AI's notes about the person (`survival-llm-memory.txt`, with the app's settings) and, while the person allows it, `core.py` gives the model one short extra turn after answers to messages about the person or their family, to say what to remember, change or forget (a JSON reply the app checks and applies). The notes, today's date and the names of the person's files are added after the instructions when a chat starts.
 - `library/myfiles.py` reads the person's own files into a small index of their own (kept with the app's settings) and searches it together with the library.
-- Everything except Ollama, the app window (pywebview) and PDF reading (pypdf) is the Python standard library.
+- Everything except Ollama, the app window (pywebview), PDF reading (pypdf) and checking web certificates with the system's own store (truststore) is the Python standard library.
 
 ## Run from source
 
 ```bash
-python3 app/server.py          # the app in its own window (needs `pip install pywebview pypdf`; else it uses your browser)
+python3 app/server.py          # the app in its own window (needs `pip install pywebview pypdf truststore`; else it uses your browser)
 python3 app/server.py --browser                     # in your web browser instead
 python3 chat.py "How long is fridge food safe in a blackout?"   # terminal; --model NAME picks a model
 ```
 
 The library is looked up at `$SURVIVAL_LLM_LIBRARY`, then `~/Survival LLM Library`, then `library.noindex/` next to the code.
 Without a built-in engine, the app uses an Ollama you have installed (`ollama serve`).
+
+`python3 tests/run_all.py` checks memory and the handling of what models write (forget requests, notes about different
+people, Sources lines), with a stand-in for the model: no Ollama or library needed. Run it after changing `memory.py` or
+`core.py`, and `evals/memory_eval.py --step MODEL ...` to see how real models do.
 
 ## Build the library
 
