@@ -11,6 +11,7 @@ and library.noindex/index.sqlite (SQLite FTS5 over ~1,500-character passages).
 import csv
 import fcntl
 import glob
+import hashlib
 import json
 import multiprocessing as mp
 import os
@@ -559,9 +560,14 @@ def build_source(db, key, label, topic, origin, docs_iter):
         source_id = db.execute("INSERT INTO sources(key, label, topic, origin) VALUES(?,?,?,?)",
                                (key, label, topic, os.path.basename(origin))).lastrowid
         writer = SourceWriter(db, source_id, key, label)
+        copies = set()  # sites serve some pages at several addresses (CDC's Yellow Book under every country)
         for title, url, text in docs_iter:
             if seen_titles and title.lower() in seen_titles:
                 continue
+            digest = hashlib.blake2b(f"{title}\n{text}".encode(), digest_size=16).digest()
+            if digest in copies:
+                continue
+            copies.add(digest)
             writer.add(title, url, text)
             if writer.docs % 20000 == 0:
                 print(f"    {writer.docs:,} articles, {time.time() - start:.0f}s", flush=True)
