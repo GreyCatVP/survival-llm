@@ -1,19 +1,19 @@
 {
- "version": "0.2.1",
- "date": "2026-10-24",
+ "version": "0.3.0",
+ "date": "2026-10-26",
  "notes": [
-  "Fixes a false \"Not enough free disk space\" message on Macs: free space is now counted the way System Settings counts it.",
-  "Installing the Everything library needs about 27 GB free instead of 36.",
-  "If the disk fills up during an install, the app says so plainly, and trying again only downloads what it has to."
+  "Memory: tell it about yourself and it keeps short notes for later chats. See and edit them under Memory at the top, or turn the AI's saving off.",
+  "Fixes CERTIFICATE_VERIFY_FAILED when downloading on computers whose network or antivirus uses its own certificates.",
+  "The AI can no longer cite an article it never found in a search."
  ],
  "mac": {
-  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.2.1/Survival-LLM-mac.zip",
-  "bytes": 212763282,
-  "sha256": "f598d1694c99d214d4a0077fa96dbf8a6f63b05da13fc14f763db529099b9f9d"
+  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.0/Survival-LLM-mac.zip",
+  "bytes": 212808145,
+  "sha256": "a1a89727bec4b33276a2438602d4675d412d4f13d263893d4be87a21e63becce"
  },
  "windows": {
-  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.2.1/Survival-LLM-windows.zip",
-  "bytes": 25172684,
-  "sha256": "e08132d981f2b291f129a80139a7ef9ae2f444fb5c765302eaf67becc416fbe6"
+  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.0/Survival-LLM-windows.zip",
+  "bytes": 25215879,
+  "sha256": "1f85c212a3232bcb22131786a6cedf95aba50c1f11a05831a697545370a2b87d"
  }
 }
