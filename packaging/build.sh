@@ -4,7 +4,11 @@
 # app code. The Mac app also carries Ollama (the AI engine); the Windows one downloads it on first use, since
 # Ollama for Windows is 1.6 GB. The AI model and the library are downloaded from inside the app.
 # Output: dist/Survival-LLM-mac.zip and dist/Survival-LLM-windows.zip
+#   build.sh mac   only the Mac app (dist/mac and its zip), as bin/dev --release runs it
+#   build.sh dev   only "Survival LLM Dev" in ~/Applications: the Mac app running the code in this folder (bin/dev)
 set -euo pipefail
+TARGET="${1:-all}"
+case "$TARGET" in all|mac|dev) ;; *) echo "usage: packaging/build.sh [mac|dev]" >&2; exit 2 ;; esac
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$HERE")"
@@ -47,6 +51,50 @@ fetch_ollama() {  # $1 = release file name; checked against Ollama's published c
   echo "$CACHE/$file"
 }
 
+info_plist() {  # $1 = app name (also its executable's), $2 = bundle id
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>$1</string>
+  <key>CFBundleDisplayName</key><string>$1</string>
+  <key>CFBundleIdentifier</key><string>$2</string>
+  <key>CFBundleExecutable</key><string>$1</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  $( [ -f "$HERE/AppIcon.icns" ] && echo "<key>CFBundleIconFile</key><string>AppIcon</string>" )
+</dict></plist>
+EOF
+}
+
+# ---------- dev copy: the Mac app running the code in this folder, as it is when it starts (bin/dev) ----------
+# The same Python, pywebview, launcher and Ollama as the real app, but its code is a link to this folder, and it has
+# its own name, settings, memory and files, so an installed Survival LLM stays as it is. Not signed or sealed: it is
+# built on this Mac, so macOS runs it as is.
+if [ "$TARGET" = dev ]; then
+  DEV_APP="$HOME/Applications/Survival LLM Dev.app"
+  DEV_RES="$DEV_APP/Contents/Resources"
+  PROFILE="$HOME/Library/Application Support/Survival LLM Dev"
+  rm -rf "$DEV_APP"
+  mkdir -p "$DEV_APP/Contents/MacOS" "$DEV_RES/ollama"
+  tar -xzf "$(fetch_python aarch64-apple-darwin)" -C "$DEV_RES"
+  "$DEV_RES/python/bin/python3" -m pip install -q --no-compile --disable-pip-version-check "$PYWEBVIEW" "$PYPDF" "$TRUSTSTORE"
+  rm -rf "$DEV_RES/python/lib/python3.12/site-packages/PyObjCTest"
+  tar -xzf "$(fetch_ollama ollama-darwin.tgz)" -C "$DEV_RES/ollama"
+  ln -s "$REPO" "$DEV_RES/app"
+  clang -O2 -arch arm64 -mmacosx-version-min=14.0 -DSURVIVAL_LLM_DEV "$HERE/launcher.c" \
+    -o "$DEV_APP/Contents/MacOS/Survival LLM Dev" -I"$DEV_RES/python/include/python3.12" -L"$DEV_RES/python/lib" \
+    -lpython3.12 -Wl,-rpath,@executable_path/../Resources/python/lib
+  printf '%s\n' "SURVIVAL_LLM_DEV=1" "SURVIVAL_LLM_APP_DIR=$PROFILE" "SURVIVAL_LLM_FILES=$PROFILE/files" > "$DEV_RES/dev.env"
+  info_plist "Survival LLM Dev" org.survival-llm.dev > "$DEV_APP/Contents/Info.plist"
+  [ -f "$HERE/AppIcon.icns" ] && cp "$HERE/AppIcon.icns" "$DEV_RES/"
+  echo "Built $DEV_APP"
+  exit 0
+fi
+
 # ---------- macOS (Apple Silicon) ----------
 APP="$DIST/mac/Survival LLM.app"
 RES="$APP/Contents/Resources"
@@ -59,22 +107,7 @@ copy_app "$RES/app"
 clang -O2 -arch arm64 -mmacosx-version-min=14.0 "$HERE/launcher.c" -o "$APP/Contents/MacOS/Survival LLM" \
   -I"$RES/python/include/python3.12" -L"$RES/python/lib" -lpython3.12 \
   -Wl,-rpath,@executable_path/../Resources/python/lib
-cat > "$APP/Contents/Info.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Survival LLM</string>
-  <key>CFBundleDisplayName</key><string>Survival LLM</string>
-  <key>CFBundleIdentifier</key><string>org.survival-llm.app</string>
-  <key>CFBundleExecutable</key><string>Survival LLM</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>$VERSION</string>
-  <key>CFBundleVersion</key><string>$VERSION</string>
-  <key>LSMinimumSystemVersion</key><string>14.0</string>
-  <key>NSHighResolutionCapable</key><true/>
-  $( [ -f "$HERE/AppIcon.icns" ] && echo "<key>CFBundleIconFile</key><string>AppIcon</string>" )
-</dict></plist>
-EOF
+info_plist "Survival LLM" org.survival-llm.app > "$APP/Contents/Info.plist"
 [ -f "$HERE/AppIcon.icns" ] && cp "$HERE/AppIcon.icns" "$APP/Contents/Resources/"
 xattr -cr "$APP"  # no stray extended attributes in the zip (other unzippers turn them into files that break the seal)
 codesign --force --deep --sign - "$APP" 2>/dev/null   # ad-hoc signature; Apple Silicon refuses unsigned code
@@ -85,6 +118,10 @@ tar -xzf "$(fetch_ollama ollama-darwin.tgz)" -C "$RES/ollama"
 codesign --force --sign - "$APP"
 rm -f "$DIST/Survival-LLM-mac.zip"
 (cd "$DIST/mac" && ditto -c -k --norsrc --noextattr --keepParent "Survival LLM.app" "$DIST/Survival-LLM-mac.zip")
+if [ "$TARGET" = mac ]; then
+  ls -lh "$DIST/Survival-LLM-mac.zip"
+  exit 0
+fi
 
 # ---------- Windows (x64) ----------
 WIN="$DIST/windows/Survival LLM"

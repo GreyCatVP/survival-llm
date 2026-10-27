@@ -101,7 +101,9 @@ DISK_MARGIN_GB = 5  # keep this much free after a download
 MANIFEST_URL = os.environ.get("SURVIVAL_LLM_MANIFEST") or \
     "https://anonnerdfrenzy.github.io/survival-llm/library-packs.json"
 
-if sys.platform == "darwin":
+if os.environ.get("SURVIVAL_LLM_APP_DIR"):  # another settings folder, such as the dev copy's (bin/dev)
+    APP_DIR = os.environ["SURVIVAL_LLM_APP_DIR"]
+elif sys.platform == "darwin":
     APP_DIR = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Survival LLM")
 elif os.name == "nt":
     APP_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "Survival LLM")
@@ -159,6 +161,24 @@ def _read_version():
 
 
 VERSION = _read_version()
+
+
+def _dev_label(value):
+    """A copy for trying changes before they ship (bin/dev) gets SURVIVAL_LLM_DEV: what it runs, or "1" to read
+    that from git ("reasoning-view @ 13806f4, with uncommitted changes"). It says so on screen and never updates."""
+    if value != "1":
+        return value or None
+    def git(*args):
+        return subprocess.run(["git", "-C", ROOT, *args], capture_output=True, text=True, timeout=10).stdout.strip()
+    try:
+        branch, commit = git("rev-parse", "--abbrev-ref", "HEAD"), git("rev-parse", "--short", "HEAD")
+        changed = git("status", "--porcelain", "--untracked-files=no")
+    except (OSError, subprocess.SubprocessError):
+        return "dev copy"
+    return f"{branch} @ {commit}" + (", with uncommitted changes" if changed else "") if commit else "dev copy"
+
+
+DEV = _dev_label(os.environ.get("SURVIVAL_LLM_DEV"))
 engine_procs = []   # Ollama processes this app started, stopped when it quits
 
 conversations = {}
@@ -870,6 +890,8 @@ def writable(folder):
 
 def update_blocker():
     """Why this copy can't update itself, as a sentence for the person; None if it can."""
+    if DEV:
+        return "This is a dev copy of Survival LLM (started with bin/dev), so it doesn't update itself."
     where = install_location()
     if where is None:
         if "/AppTranslocation/" in ROOT:
@@ -1133,7 +1155,7 @@ class Handler(BaseHTTPRequestHandler):
             "packs_error": None if docs else manifest["error"],
             "library_dir": LIB, "disk_free_gb": disk_free_gb(),
             "my_files": {"ready": mine, "busy": myfiles.progress["busy"]},
-            "version": VERSION,
+            "version": VERSION, "dev": DEV,
             "update": {"app": (newer_app() or {}).get("version"), "library": bool(newer_library())},
             "machine": {"os": "macOS" if sys.platform == "darwin" else platform.system(), "ram_gb": ram_gb()},
             "topics": TOPICS}
@@ -1376,8 +1398,8 @@ def open_window(url):
         return False
     try:
         webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True  # source links go to the browser, not this window
-        window = webview.create_window("Survival LLM", url, width=1280, height=860, min_size=(420, 520),
-                                       text_select=True)
+        window = webview.create_window(f"Survival LLM (dev: {DEV})" if DEV else "Survival LLM", url, width=1280,
+                                       height=860, min_size=(420, 520), text_select=True)
         quit_hooks.append(window.destroy)
         webview.start(gui="edgechromium" if os.name == "nt" else None, private_mode=False,
                       storage_path=os.path.join(APP_DIR, "window"))
@@ -1425,7 +1447,7 @@ if __name__ == "__main__":
     os.makedirs(APP_DIR, exist_ok=True)
     with open(STATE, "w") as f:
         json.dump({"port": PORT, "pid": os.getpid()}, f)
-    print(f"Survival LLM is running at {url}", flush=True)
+    print(f"Survival LLM {VERSION}{f' (dev: {DEV})' if DEV else ''} is running at {url}", flush=True)
     check_my_files()  # files put in the folder while the app was closed
     threading.Thread(target=auto_check_updates, daemon=True).start()
     try:

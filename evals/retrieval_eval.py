@@ -144,7 +144,7 @@ def run(model):
                 for ev in chat_events(model, library, messages, caps=caps, memory=memory):
                     if ev["type"] == "done":
                         done = ev
-                    elif ev["type"] not in ("token", "tick"):
+                    elif ev["type"] not in ("token", "tick", "thinking"):
                         events.append(ev)
             except Exception as exc:  # a broken tool call counts as a failed answer, not a crashed run
                 done = {"answer": f"[error: {exc}]", "tokens": 0, "seconds": 0}

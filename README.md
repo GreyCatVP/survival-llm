@@ -7,6 +7,7 @@ and shows you the exact passage each answer came from.
 
 - **Offline and private.** The AI model and the library live on your computer. Your questions never leave it, and once set up it works with the internet off.
 - **Shows its sources.** Every answer lists the articles it read; click one to read it yourself, cited passage highlighted, with its license. Ask "where did you get that?" and it opens the source.
+- **Shows its reasoning.** Show reasoning, under each answer, opens what the AI thought before it answered, step by step, with the searches and articles it read in between. It stays hidden until you click it. Most models reason first only when Think harder is ticked; Qwen always does.
 - **Yours to adjust.** The Instructions button shows the instructions the AI gets before you ask anything (the app adds today's date, the names of your files and your Memory notes after them); edit them and Save to change how it answers (Reset brings back the original). The Length limit next to Send sets how long an answer may run, or turns the limit off.
 - **Add your own files.** Your files, at the top, takes PDFs, Word documents, EPUB ebooks, web pages and text files (drop them on the window or choose them), so the AI can search your generator's manual, your medicines list or your family's emergency plan along with the library. They stay on your computer, in the `Survival LLM Files` folder in your home folder; files you put in that folder, or change there, are picked up on their own. It can't read scans or photos of pages yet.
 - **Remembers you.** Tell it your daughter is allergic to penicillin or that you have a Honda generator, and it saves a short note so later chats know it too; each answer shows what it saved, with Undo. Memory, at the top, shows every note in one list you can edit, and a switch turns off the AI's saving (it still reads the notes you keep). The notes stay on your computer, in one plain text file with the app's settings.
@@ -137,6 +138,22 @@ Without a built-in engine, the app uses an Ollama you have installed (`ollama se
 `python3 tests/run_all.py` checks memory and the handling of what models write (forget requests, notes about different
 people, Sources lines), with a stand-in for the model: no Ollama or library needed. Run it after changing `memory.py` or
 `core.py`, and `evals/memory_eval.py --step MODEL ...` to see how real models do.
+
+## Try changes as the Mac app
+
+```bash
+bin/dev              # "Survival LLM Dev": the Mac app running the code in this folder (restarts it if it's open)
+bin/dev --fresh      # the same, as a brand-new person sees it: no library, memory, files or settings
+bin/dev --release    # build the Mac app exactly as it ships (packaging/build.sh mac) and run that build
+bin/dev stop         # quit it; bin/dev reset deletes its settings, memory and files; bin/dev log follows its log
+```
+
+Survival LLM Dev is built once into `~/Applications` (`--rebuild` builds it again) with the same Python, pywebview and
+Ollama as the real app, but its code is a link to this folder, so every start runs the code as it is then; Spotlight
+opens it too. It keeps its own settings, memory and files in `~/Library/Application Support/Survival LLM Dev`, so an
+installed Survival LLM is left alone, and it shares the library and the AI models. A Dev badge and the line at the
+bottom of the window name the branch and commit it runs, and it never updates itself. Its log is
+`~/Library/Logs/Survival LLM Dev.log`.
 
 ## Build the library
 

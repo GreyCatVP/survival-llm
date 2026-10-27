@@ -2,8 +2,8 @@
 
 Usage: chat.py [--model NAME] [question ...]   (default: the first chat model Ollama has)
 With a question it answers once and exits; without one it opens a chat.
-In a chat: /sources lists what the last answer used, /open N opens one, /new, /think,
-/limit normal|long|none sets how long an answer may run, /bye.
+In a chat: /sources lists what the last answer used, /open N opens one, /reasoning shows its reasoning, /new,
+/think, /limit normal|long|none sets how long an answer may run, /bye.
 """
 import os
 import subprocess
@@ -41,22 +41,33 @@ def open_article(library, passage_id):
 
 
 def run_turn(model, library, messages, deep, caps, length="normal"):
-    """Print one answer as it streams; returns the sources it used."""
-    sources = []
+    """Print one answer as it streams; returns the sources it used and its reasoning (for /reasoning)."""
+    sources, reasoning = [], []  # reasoning: what it thought, with its lookups in between
     fresh = True  # nothing printed since the last lookup; skip the blank lines models emit before tool calls
+    thinking, thoughts = False, 0  # in a stretch of reasoning; how many stretches
     for ev in chat_events(model, library, messages, deep=deep, caps=caps, length=length):
         kind = ev["type"]
         if kind not in ("token", "tick"):
             fresh = True
+        if kind != "tick":
+            thinking = thinking and kind == "thinking"
         if kind == "thinking":
-            print(f"{DIM}  · thinking{RESET}", flush=True)
+            if not thinking and ev["text"].strip():
+                print(f"{DIM}  · thinking{'' if thoughts else ' (/reasoning shows it)'}{RESET}", flush=True)
+                reasoning.append("")
+                thinking, thoughts = True, thoughts + 1
+            if thinking:
+                reasoning[-1] += ev["text"]
         elif kind == "search":
             topic = f" [{ev['topic']}]" if ev["topic"] != "any" else ""
             print(f"{DIM}  · searching: {ev['query']}{topic}{RESET}", flush=True)
+            reasoning.append(f"· searching: {ev['query']}{topic}")
         elif kind == "read":
             print(f"{DIM}  · reading: {ev['title']} ({ev['source']}){RESET}", flush=True)
+            reasoning.append(f"· reading: {ev['title']} ({ev['source']})")
         elif kind == "show":
             open_article(library, ev["id"])
+            reasoning.append(f"· opened: {ev['title']} ({ev['source']})")
         elif kind == "token":
             if fresh and not ev["text"].strip():
                 continue
@@ -71,7 +82,7 @@ def run_turn(model, library, messages, deep, caps, length="normal"):
             elif ev.get("unfinished"):
                 print(f"\n{DIM}[it kept looking things up and did not finish; try asking again]{RESET}")
             print(f"\n{DIM}[{ev['tokens']} tokens{speed}{note}]{RESET}")
-    return sources
+    return sources, "\n\n".join(r.strip() for r in reasoning if r.strip()) if thoughts else ""
 
 
 def main():
@@ -108,9 +119,9 @@ def main():
     docs, n_sources = library.stats() if library else (0, 0)
     lib_note = f"library: {docs:,} articles from {n_sources} sources" if library else "no library found"
     print(f"{BOLD}{model.removesuffix(':latest')}{RESET} {DIM}· offline · {lib_note}{RESET}")
-    print(f"{DIM}Ask anything. /sources shows what the last answer read, /open N opens one, "
-          f"/new starts over, /think toggles deep thinking, /limit sets the answer length limit, /bye quits.{RESET}")
-    last_sources = []
+    print(f"{DIM}Ask anything. /sources shows what the last answer read, /open N opens one, /reasoning shows how it "
+          f"reasoned, /new starts over, /think toggles deep thinking, /limit sets the answer length limit, /bye quits.{RESET}")
+    last_sources, last_reasoning = [], ""
     while True:
         try:
             question = input("\n> ").strip()
@@ -137,6 +148,10 @@ def main():
             else:
                 print(f"{DIM}Use /limit normal, /limit long or /limit none (now: {length}).{RESET}")
             continue
+        if question == "/reasoning":
+            print(f"{DIM}{last_reasoning}{RESET}" if last_reasoning else
+                  f"{DIM}The last answer had no reasoning. /think makes the model reason before it answers.{RESET}")
+            continue
         if question == "/sources":
             if not last_sources:
                 print(f"{DIM}The last answer did not read anything from the library.{RESET}")
@@ -153,8 +168,10 @@ def main():
         messages.append({"role": "user", "content": question})
         trim(messages)
         print()
+        last_reasoning = ""
         try:
-            last_sources = run_turn(model, library, messages, deep, caps, length) or last_sources
+            used, last_reasoning = run_turn(model, library, messages, deep, caps, length)
+            last_sources = used or last_sources
         except KeyboardInterrupt:
             print(f"\n{DIM}[stopped]{RESET}")
         except OSError as exc:

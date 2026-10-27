@@ -442,14 +442,18 @@ async function ask(text) {
   els.welcome.hidden = true;
   addMessage("user", `<div class="bubble">${esc(text)}</div>`);
   const msg = addMessage("assistant", `<details class="how" open><summary>Working on it…</summary><div class="activity"></div></details>
-    <div class="answer cursor"></div><div class="remembered"></div><div class="meta"></div><div class="sources"></div>`);
+    <div class="answer cursor"></div><div class="remembered"></div>
+    <div class="answer-foot"><div class="meta"></div><button type="button" class="link reasoning-btn" aria-expanded="false">Show reasoning</button></div>
+    <div class="reasoning" hidden><div class="reasoning-head"></div><div class="reasoning-note"></div><div class="reasoning-body"></div></div>
+    <div class="sources"></div>`);
   const how = msg.querySelector(".how"), summary = how.querySelector("summary"), activity = how.querySelector(".activity");
   const answerEl = msg.querySelector(".answer"), meta = msg.querySelector(".meta"), sourcesEl = msg.querySelector(".sources");
   const started = Date.now();
   let answer = "", queued = false, steps = 0, failed = false, answered = false;
+  let thought = null, thoughts = 0, thoughtMs = 0, thinkSetting;  // thought: the stretch of reasoning streaming in now
   const remembered = msg.querySelector(".remembered"), changes = [];  // memory changes, announced together at the end
   const tick = setInterval(() => {
-    summary.textContent = `${nameOf(model)} is working on it… ${Math.round((Date.now() - started) / 1000)} s`;
+    summary.textContent = `${nameOf(model)} is ${thought ? "thinking" : "working on it"}… ${Math.round((Date.now() - started) / 1000)} s`;
   }, 1000);
   const render = () => { queued = false; answerEl.innerHTML = md(answer); scrollDown(); };
   const note = (label, id, howText) => {
@@ -460,6 +464,74 @@ async function ask(text) {
     steps += 1;
     scrollDown();
   };
+  // Its reasoning, hidden until the person presses Show reasoning: a timeline of each stretch of thinking and the
+  // lookups in between, in the order they happened. It streams in while hidden, so it can be opened at any point.
+  const reasonBtn = msg.querySelector(".reasoning-btn"), reasoning = msg.querySelector(".reasoning");
+  const reasonHead = reasoning.querySelector(".reasoning-head"), reasonBody = reasoning.querySelector(".reasoning-body");
+  const duration = (ms) => `${Math.max(1, Math.round(ms / 1000))} s`;
+  const reasonStatus = (final) => {
+    const who = nameOf(model);
+    reasonHead.textContent = !final ? (thought ? `${who} is thinking…` : thoughts ? `${who}'s reasoning so far` : "No reasoning yet.")
+      : thoughts ? `${who}'s reasoning before it answered · ${duration(thoughtMs)}`
+      : thinkSetting === false ? `${who} answered without reasoning first. Tick “Think harder” before you ask, and it reasons first (slower).`
+      : thinkSetting === null ? `${who} doesn't reason before it answers, so there's nothing to show.`
+      : "No reasoning to show for this answer.";
+    reasoning.querySelector(".reasoning-note").textContent = thoughts
+      ? "Before it answers, the AI thinks by writing notes to itself, and looks things up in between. In its notes, “the user” "
+        + "means you. They can include ideas it dropped along the way, so go by the answer." : "";
+    reasonHead.classList.toggle("plain", !thoughts);  // a sentence saying why there is none, not a heading
+    reasonBody.hidden = !thoughts;
+  };
+  const row = (kind, cls) => {  // one entry in the timeline: what kind of step, then what it was; returns the second
+    const el = document.createElement("div");
+    el.className = `r-row ${cls}`;
+    el.innerHTML = `<div class="r-kind"></div><div class="r-what"></div>`;
+    el.firstChild.textContent = kind;
+    reasonBody.appendChild(el);
+    return el.lastChild;
+  };
+  reasonBtn.onclick = () => {
+    reasoning.hidden = !reasoning.hidden;
+    reasonBtn.textContent = reasoning.hidden ? "Show reasoning" : "Hide reasoning";
+    reasonBtn.setAttribute("aria-expanded", String(!reasoning.hidden));
+  };
+  const paintThought = (t) => {
+    t.queued = false;
+    const box = reasonBody, pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 24;  // follow it unless scrolled up
+    t.el.innerHTML = md(t.text.trim());  // models write their reasoning in Markdown too
+    if (pinned) box.scrollTop = box.scrollHeight;
+    if (!reasoning.hidden) scrollDown();
+  };
+  const think = (text) => {
+    if (!thought) {
+      if (!text.trim()) return;  // blank lines before it starts
+      thought = { el: row("Thought", "r-thought"), text: "", started: Date.now(), queued: false };
+      thoughts += 1;
+      reasonStatus(false);
+    }
+    thought.text += text;
+    if (!thought.queued) { thought.queued = true; const t = thought; requestAnimationFrame(() => paintThought(t)); }
+  };
+  const endThought = () => {
+    if (!thought) return;
+    thoughtMs += Date.now() - thought.started;
+    paintThought(thought);
+    thought = null;
+    reasonStatus(false);
+  };
+  const reasonStep = (ev) => {  // a lookup between its thoughts; an article it read opens on a click, as above
+    const what = row({ search: "Searched", read: "Read", show: "Opened" }[ev.type], "r-step");
+    if (ev.type === "search") { what.textContent = `the library for “${ev.query}”`; return; }
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "linklike";
+    b.textContent = `${ev.title} · ${ev.source}`;
+    b.onclick = () => openArticle(ev.id, ev.type === "read" ? "The answer used this part" : "The answer pointed here", b);
+    what.appendChild(b);
+  };
+  const lookupLabel = (ev) => (ev.type === "search" ? `Searched the library: “${ev.query}”`
+    : ev.type === "read" ? `Read: ${ev.title} · ${ev.source}` : `Opened for you: ${ev.title}`);
+  reasonStatus(false);
   if (firstLoad) note("Loading the AI into memory. The first answer can take a minute, and the fans may spin up; that's normal.");
   setBusy(new AbortController());
   scrollDown();
@@ -473,15 +545,20 @@ async function ask(text) {
     });
     if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || `error ${resp.status}`);
     for await (const ev of events(resp)) {
-      if (["search", "read", "show"].includes(ev.type) && answer) { answer = ""; render(); } // text before a lookup is not the answer
-      if (ev.type === "memory_check") memoryChecking(msg, true);
+      if (ev.type !== "thinking") endThought();
+      if (["search", "read", "show"].includes(ev.type)) {
+        if (answer) { answer = ""; render(); }  // text before a lookup is not the answer
+        reasonStep(ev);
+      }
+      if (ev.type === "thinking") think(ev.text);
+      else if (ev.type === "memory_check") memoryChecking(msg, true);
       else if (ev.type === "memory") changes.push(showRemembered(remembered, ev));
       else if (ev.type === "memory_failed") memoryNote(remembered, "Couldn't update memory this time.");
       else if (ev.type === "memory_unchanged") memoryNote(remembered, "Memory didn't change. You can edit it yourself:", true);
-      else if (ev.type === "search") note(`Searched the library: “${ev.query}”`);
-      else if (ev.type === "read") note(`Read: ${ev.title} · ${ev.source}`, ev.id, "The answer used this part");
+      else if (ev.type === "search") note(lookupLabel(ev));
+      else if (ev.type === "read") note(lookupLabel(ev), ev.id, "The answer used this part");
       else if (ev.type === "show") {
-        note(`Opened for you: ${ev.title}`, ev.id, "The answer pointed here");
+        note(lookupLabel(ev), ev.id, "The answer pointed here");
         if (!narrow()) openArticle(ev.id, "The answer pointed here");
       } else if (ev.type === "token") {
         answer += ev.text;
@@ -494,6 +571,8 @@ async function ask(text) {
         meta.classList.add("error");
       } else if (ev.type === "done") {
         answered = true;  // a memory step may still follow
+        thinkSetting = ev.think;  // whether it was asked to reason first, for when it didn't
+        reasonStatus(true);  // its reasoning for the answer is complete (the memory step's isn't shown)
         answer = ev.unfinished ? ev.answer || "" : ev.answer || answer;  // unfinished: what streamed isn't an answer
         render();
         showSources(sourcesEl, ev);
@@ -510,7 +589,7 @@ async function ask(text) {
           more.className = "ghost keep-going";
           more.textContent = "Keep going";
           more.onclick = () => { if (busy) return; more.remove(); ask("Please continue exactly where you stopped."); };
-          meta.after(more);
+          reasoning.after(more);
         }
         announce(`Answer ready from ${nameOf(model)}.`);
       }
@@ -526,6 +605,8 @@ async function ask(text) {
     else { meta.textContent = `Couldn't get an answer: ${err.message || err}`; meta.classList.add("error"); }
   } finally {
     clearInterval(tick);
+    endThought();
+    reasonStatus(true);
     memoryChecking(msg, false);
     if (changes.length) announce(changes.join(". "));
     summary.textContent = steps ? `How it found this (${steps} step${steps === 1 ? "" : "s"})` : "Details";
@@ -864,7 +945,9 @@ let updateError = "";
 
 function renderVersion() {
   $("version-line").hidden = !state.version;
-  $("version-text").textContent = `Survival LLM ${state.version}`;
+  $("version-text").textContent = `Survival LLM ${state.version}` + (state.dev ? ` · dev copy: ${state.dev}` : "");
+  $("dev-badge").hidden = !state.dev;  // a copy for trying changes before they ship (bin/dev)
+  $("dev-badge").title = state.dev ? `Dev copy: ${state.dev}` : "";
   const app = state.update?.app;
   $("updates-btn").textContent = app || state.update?.library ? "Update available" : "Check for updates";
   $("update-banner").hidden = !app || recall("update-dismissed") === app;

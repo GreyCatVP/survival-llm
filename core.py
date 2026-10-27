@@ -283,8 +283,9 @@ PERSONAL = re.compile(r"\b(i|i'm|im|i've|ive|i'd|my|me|mine|myself|we|we're|we'v
 
 
 def chat_events(model, library, messages, deep=False, caps=None, length="normal", memory=None):
-    """Answer the last user message. Yields thinking/search/read/show/token/tick/done events, then, with a memory
-    the person lets the AI write to, memory_check and memory events from a short step after the answer."""
+    """Answer the last user message. Yields thinking/search/read/show/token/tick/done events (thinking and token
+    events carry the model's reasoning and answer as they stream), then, with a memory the person lets the AI write
+    to, memory_check and memory events from a short step after the answer."""
     caps = capabilities(model) if caps is None else caps
     can_call = "tools" in caps
     tools = TOOLS if (library and can_call) else None
@@ -307,14 +308,13 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
         nudged = bool(tools) and not use_tools
         if nudged:
             messages.append({"role": "user", "content": FINAL_NUDGE})
-        content, calls, final, thought, held = [], [], {}, False, []
+        content, calls, final, held = [], [], {}, []
         for chunk in _stream(model, messages, use_tools, think, options):
             msg = chunk.get("message", {})
-            if msg.get("thinking") and not thought:
-                thought = True
-                yield {"type": "thinking"}
+            if msg.get("thinking"):
+                yield {"type": "thinking", "text": msg["thinking"]}  # its reasoning, which the person can read
             elif not msg.get("content"):
-                yield {"type": "tick"}  # lets the server notice a closed page while the model thinks
+                yield {"type": "tick"}  # nothing to show: lets the server notice a closed page
             if msg.get("content"):
                 content.append(msg["content"])
                 # Some models write a tool call out as text before Ollama turns it into tool_calls; keep that
@@ -406,7 +406,7 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
             + answer[cut:]
     yield {"type": "done", "tokens": tokens, "seconds": seconds, "answer": answer, "cut_off": cut_off,
            "unfinished": unfinished, "unopened": unopened, "named": named if library and not unfinished else None,
-           "sources": read, "seen": found[len(read):]}
+           "sources": read, "seen": found[len(read):], "think": think}
     # Only when they said something about themselves or their family, or asked it to remember or forget something: the
     # step takes a few seconds. Not after an answer cut off at the length limit, which "Keep going" continues. It reads
     # only what the person said, so an answer that didn't finish doesn't stop it.

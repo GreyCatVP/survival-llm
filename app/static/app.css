@@ -279,3 +279,33 @@ a:focus-visible, button:focus-visible, select:focus-visible, summary:focus-visib
 .memory-saved .link:disabled { opacity: .5; cursor: default; }
 #memory-count.error { color: var(--danger); }
 .memory-checking { font-size: 13px; color: var(--muted); margin-top: 6px; }
+
+/* its reasoning, behind the Show reasoning button under each answer */
+.answer-foot { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; margin-top: 6px; }
+.answer-foot .meta { margin-top: 0; }
+.answer-foot .meta:empty { display: none; }
+.reasoning-btn { font-size: 13px; color: var(--muted); }
+.reasoning-btn:hover { color: var(--text); }
+.reasoning { margin-top: 8px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+  font-size: 14px; color: var(--muted); }
+.reasoning-head { font-weight: 600; color: var(--text); }
+.reasoning-head.plain { font-weight: 400; }
+.reasoning-note { font-size: 13px; margin-top: 2px; line-height: 1.45; }
+.reasoning-note:empty { display: none; }
+.reasoning-body { max-height: 60vh; overflow-y: auto; margin-top: 10px; }
+.reasoning-body .r-row { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 12px; padding: 8px 0;
+  border-top: 1px solid var(--line); }
+.reasoning-body .r-kind { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding-top: 2px; }
+.reasoning-body .r-step .r-kind { color: var(--accent); }
+.reasoning-body .r-step { font-size: 13px; }
+.reasoning-body .r-thought .r-what { color: var(--text); overflow-wrap: anywhere; }
+.reasoning-body .r-what p { margin: 0 0 6px; }
+.reasoning-body .r-what ul, .reasoning-body .r-what ol { margin: 0 0 6px; padding-left: 22px; }
+.reasoning-body .r-what > :last-child { margin-bottom: 0; }
+.reasoning-body .r-what h3, .reasoning-body .r-what h4, .reasoning-body .r-what h5, .reasoning-body .r-what h6 { margin: 8px 0 4px; font-size: 14px; }
+.reasoning-body .r-what code { background: var(--user); padding: 1px 4px; border-radius: 4px; font-size: 13px; }
+.reasoning-body .r-what pre { background: var(--user); padding: 8px; border-radius: 6px; overflow-x: auto; }
+
+/* a dev copy (bin/dev), so it can't be mistaken for the real app */
+.dev-badge { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #fff;
+  background: #5b4bc4; border-radius: 5px; padding: 1px 7px; }
