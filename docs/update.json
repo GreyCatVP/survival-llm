@@ -1,19 +1,17 @@
 {
- "version": "0.3.0",
- "date": "2026-10-26",
+ "version": "0.3.1",
+ "date": "2026-10-27",
  "notes": [
-  "Memory: tell it about yourself and it keeps short notes for later chats. See and edit them under Memory at the top, or turn the AI's saving off.",
-  "Fixes CERTIFICATE_VERIFY_FAILED when downloading on computers whose network or antivirus uses its own certificates.",
-  "The AI can no longer cite an article it never found in a search."
+  "Show reasoning: under each answer, see what the AI thought before it answered and what it looked up in between. Most models reason first only when Think harder is ticked; Qwen always does."
  ],
  "mac": {
-  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.0/Survival-LLM-mac.zip",
-  "bytes": 212808145,
-  "sha256": "a1a89727bec4b33276a2438602d4675d412d4f13d263893d4be87a21e63becce"
+  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.1/Survival-LLM-mac.zip",
+  "bytes": 212811340,
+  "sha256": "7f36feb19b95983f42da2e9ee807b2b1270fdda23e586caeb0d7df6693b721b0"
  },
  "windows": {
-  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.0/Survival-LLM-windows.zip",
-  "bytes": 25215879,
-  "sha256": "1f85c212a3232bcb22131786a6cedf95aba50c1f11a05831a697545370a2b87d"
+  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.1/Survival-LLM-windows.zip",
+  "bytes": 25219075,
+  "sha256": "9016497368d7ea8180b6cda9a6649ed062e8306c855cbce7211c49434678bf0b"
  }
 }
