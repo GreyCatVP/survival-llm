@@ -240,6 +240,7 @@ textarea:focus { border-color: var(--accent); }
 /* review fixes */
 .answer, .chip, .mr-main, .r-title, .r-snip, .msg.user .bubble, .reader-body { overflow-wrap: anywhere; }
 .step h3 { margin: 0 0 6px; font-size: 17px; }
+.step code { background: var(--user); padding: 1px 5px; border-radius: 5px; font-size: 14px; user-select: all; }
 .banner { background: var(--cite); border-bottom: 1px solid var(--cite-line); padding: 10px 16px; text-align: center; }
 .banner button { margin-left: 10px; }
 .composer-note { margin: 0 auto 8px !important; padding: 8px 12px; border-radius: 10px; font-size: 14px;

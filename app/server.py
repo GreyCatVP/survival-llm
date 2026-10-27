@@ -11,6 +11,7 @@ import ctypes
 import datetime
 import errno
 import filecmp
+import glob
 import hashlib
 import io
 import json
@@ -253,7 +254,7 @@ def my_name(path):
 
 
 def to_trash(path):
-    """Move a file to the Trash (Mac) or Recycle Bin (Windows), so removing one of their files can be undone."""
+    """Move a file to the Trash (Mac, Linux) or Recycle Bin (Windows), so removing one of their files can be undone."""
     if sys.platform == "darwin":
         try:
             from Foundation import NSURL, NSFileManager  # part of pywebview's macOS dependencies
@@ -271,6 +272,8 @@ def to_trash(path):
                   "$env:SURVIVAL_LLM_TRASH, 'AllDialogs', 'SendToRecycleBin')")  # asks before deleting for good
         subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True, timeout=60,
                        env={**os.environ, "SURVIVAL_LLM_TRASH": path}, creationflags=0x08000000)  # no console window
+    elif shutil.which("gio"):  # Linux desktops: GLib's trash, which file managers can restore from
+        subprocess.run(["gio", "trash", "--", path], check=True, capture_output=True, timeout=60)
     else:
         os.remove(path)
 
@@ -327,7 +330,32 @@ def disk_free_gb(path=None):
 
 
 def system_key():
-    return "mac" if sys.platform == "darwin" else "win"
+    return "mac" if sys.platform == "darwin" else "win"  # Linux runs the same model files as Windows
+
+
+def gpu_vendors():
+    """PCI vendor IDs of the graphics cards Linux lists ("0x10de" is NVIDIA, "0x1002" AMD, "0x8086" Intel)."""
+    vendors = set()
+    for vendor_file in glob.glob("/sys/class/drm/card[0-9]*/device/vendor"):
+        try:
+            with open(vendor_file) as f:
+                vendors.add(f.read().strip())
+        except OSError:
+            pass
+    return vendors
+
+
+def linux_engine_command():
+    """The command that installs Ollama on this Linux computer, with support for its graphics card."""
+    if not shutil.which("pacman"):
+        return "curl -fsSL https://ollama.com/install.sh | sh"
+    # Arch and Arch-based systems such as Omarchy package Ollama per graphics card. A laptop's NVIDIA or AMD card is
+    # the one to use, not its built-in Intel graphics, so they are checked first.
+    vendors = gpu_vendors()
+    for vendor_id, package in (("0x10de", "ollama-cuda"), ("0x1002", "ollama-rocm"), ("0x8086", "ollama-vulkan")):
+        if vendor_id in vendors:
+            return f"sudo pacman -S {package}"
+    return "sudo pacman -S ollama"
 
 
 def catalog_entry(model):
@@ -1122,7 +1150,8 @@ class Handler(BaseHTTPRequestHandler):
         return {
             "ollama": models is not None, "ollama_installed": bool(app or binary), "ollama_starting": ollama_starting(),
             "engine": {"downloadable": bool(info and ENGINE and not (app or binary)),
-                       "gb": round(info["bytes"] / 1e9, 1) if info else None},
+                       "gb": round(info["bytes"] / 1e9, 1) if info else None,
+                       "install_command": linux_engine_command() if sys.platform.startswith("linux") else None},
             "models": [{"model": m, "name": friendly_name(m), "tested": bool(catalog_entry(m))} for m in chat_models],
             "default_model": best or (chat_models or [None])[0],
             "loaded": loaded_models() if models is not None else [],
