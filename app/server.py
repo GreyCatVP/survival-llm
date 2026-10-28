@@ -439,6 +439,11 @@ def start_ollama():
             os.makedirs(APP_DIR, exist_ok=True)
             with open(os.path.join(APP_DIR, "ollama.log"), "wb") as log:
                 engine_procs.append(subprocess.Popen([ENGINE, "serve"], stdout=log, stderr=log, **hidden))
+            if os.name != "nt":  # Cmd+Q ends the Mac app without its cleanup: stop the engine once the app is gone
+                watch = ('while kill -0 "$1" 2>/dev/null && kill -0 "$2" 2>/dev/null; do sleep 2; done; '
+                         'kill -0 "$1" 2>/dev/null || kill "$2" 2>/dev/null')  # from issue #7, by wigginthethird
+                subprocess.Popen(["/bin/sh", "-c", watch, "survival-llm-engine-watch", str(os.getpid()),
+                                  str(engine_procs[-1].pid)], **quiet, start_new_session=True)
         elif sys.platform == "darwin" and app:
             subprocess.Popen(["open", "-g", "-a", app], **quiet)
         elif os.name == "nt" and app:
