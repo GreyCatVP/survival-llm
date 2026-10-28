@@ -5,6 +5,8 @@ internet. Ask it how to keep food safe in a blackout, treat a burn or purify wat
 offline library of medical, emergency, how-to and encyclopedia articles, answers from what it finds,
 and shows you the exact passage each answer came from.
 
+Runs on **macOS, Windows and Linux**. Installation: [Mac](#macos) · [Windows](#windows) · [Linux](#linux).
+
 - **Offline and private.** The AI model and the library live on your computer. Your questions never leave it, and once set up it works with the internet off.
 - **Shows its sources.** Every answer lists the articles it read; click one to read it yourself, cited passage highlighted, with its license. Ask "where did you get that?" and it opens the source.
 - **Shows its reasoning.** Show reasoning, under each answer, opens what the AI thought before it answered, step by step, with the searches and articles it read in between. It stays hidden until you click it. How much it reasons is up to you: Reasoning, next to Send, is a budget (Off, 1,000, 4,000 or 16,000 tokens, or no limit), and at the limit its thinking stops and it answers from what it has.
@@ -19,19 +21,59 @@ and shows you the exact passage each answer came from.
 Do this while you have internet. After that, it needs none. Setup takes 20 minutes to about 2½ hours, depending on
 your computer and internet speed (the biggest AI model is 80 GB); you only click for about 5 minutes.
 
-**Mac** (Apple Silicon, macOS 14 Sonoma or newer)
+### macOS
+
+Apple Silicon, macOS 14 Sonoma or newer.
+
 1. Download `Survival-LLM-mac.zip` and double-click it to unzip. Move **Survival LLM** to Applications if you like.
 2. Double-click **Survival LLM**. The first time, macOS says it can't verify the app, because it isn't sold through
    Apple. Click **Done**, open **System Settings > Privacy & Security**, scroll down to "Survival LLM was blocked",
    click **Open Anyway**, and confirm with your password. You only do this once.
 
-**Windows** (10 or 11, 64-bit)
+### Windows
+
+Windows 10 or 11, 64-bit.
+
 1. Download `Survival-LLM-windows.zip`, right-click it and choose **Extract All**. (Running it from inside the zip doesn't work.)
 2. Open the extracted **Survival LLM** folder and double-click **Survival LLM.bat**. If Windows says it protected
    your PC, click **More info**, then **Run anyway**.
 
+### Linux
+
+64-bit x86_64 or ARM64, a modern glibc desktop distribution.
+
+1. Install [Ollama for Linux](https://ollama.com/download/linux) while you have internet. The app uses its local
+   service, or starts `ollama serve` if `ollama` is on your PATH.
+2. For x86_64, [download the Linux preview](https://github.com/lord3nd3r/survival-llm/releases/download/v0.3.3-linux.1/Survival-LLM-linux-x86_64.zip)
+   from [this fork's Linux release](https://github.com/lord3nd3r/survival-llm/releases/tag/v0.3.3-linux.1).
+   ARM64 packages have not been published; build one with `packaging/build.sh linux` on an ARM64 Linux computer
+   (see below). The upstream Mac and Windows releases do not include Linux yet.
+   Extract the zip into a folder you can write to. Open a terminal in the extracted **Survival LLM** folder and run
+   `./survival-llm`. If your archive manager did not preserve permissions, run `chmod +x survival-llm` first.
+3. Optionally run `./survival-llm --install-desktop` to add it to your application menu. Keep the folder in place;
+   if you move it, run that command again.
+
+The Linux package includes Python, Qt and its web engine for a native app window, on X11 or Wayland. It still
+needs your distribution's desktop libraries. On Ubuntu 24.04, install missing libraries with
+`sudo apt install libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0 libnss3 libasound2t64 libglib2.0-bin xdg-utils`.
+Package names differ on other distributions. Alpine/musl is not supported by the portable build.
+`./survival-llm --browser` opens it in your browser instead; `--no-browser` runs the local server without a window.
+Logs from application-menu launches are in `${XDG_STATE_HOME:-~/.local/state}/survival-llm/app.log`.
+
+To build and launch the Linux package from a checkout of this repository:
+
+```bash
+packaging/build.sh linux
+./dist/linux-$(uname -m)/"Survival LLM"/survival-llm
+```
+
+The build needs `curl`, `tar`, `zip` and internet access. Install Ollama and the desktop libraries listed above
+before launching. To run directly from Python instead, see [Run from source](#run-from-source).
+
+### Finish setup (all platforms)
+
 **Then** the app opens in its own window and walks you through setup:
-1. **AI engine:** built into the Mac app. On Windows, one click downloads it (Ollama, 1.6 GB).
+1. **AI engine:** built into the Mac app. On Windows, one click downloads it (Ollama, 1.6 GB). On Linux, uses your installed Ollama.
 2. **AI model:** it suggests the best one for your computer's memory (below) and downloads it.
 3. **Library:** "Everything" (8.8 GB download) or "Essentials" (1.3 GB, without Wikipedia and iFixit).
 
@@ -40,11 +82,16 @@ your computer and internet speed (the biggest AI model is 80 GB); you only click
 
 ## Uninstall
 
-Delete the app, then these folders: the AI models, in `~/.ollama/models` (shared with any other Ollama on the
-computer, so keep it if you use Ollama elsewhere), and the library, in `~/Survival LLM Library`. Your own files are in
+Delete the app, then the library in `~/Survival LLM Library`. On Mac and Windows, the AI models are in
+`~/.ollama/models` (shared with any other Ollama on the computer, so keep them if you use Ollama elsewhere).
+Linux Ollama installations manage their own models. Your own files are in
 `~/Survival LLM Files`; keep that folder if you want them. The app's own
 settings are in `~/Library/Application Support/Survival LLM` on a Mac, and in `%APPDATA%\Survival LLM` plus the
 AI engine in `%LOCALAPPDATA%\Survival LLM` on Windows.
+On Linux, settings are in `${XDG_CONFIG_HOME:-~/.config}/survival-llm` (older source installs keep
+`~/.survival-llm`), logs in `${XDG_STATE_HOME:-~/.local/state}/survival-llm`, and the optional menu entry is
+`${XDG_DATA_HOME:-~/.local/share}/applications/survival-llm.desktop`. Remove those too; keep Ollama if you use it
+for other apps.
 
 ## Which model your computer gets
 
@@ -54,7 +101,7 @@ The app checks your memory and suggests a model. More memory, smarter model.
 |---|---|---|
 | Mac with 128 GB or more | NVIDIA Nemotron 3.5 Super (`nemotron-3.5-super:120b-a12b-nvfp4`) | 80 GB |
 | Mac with 32-96 GB | Qwen3.8 27B (`qwen3.8:27b-mlx`) | 18 GB |
-| Windows PC with 32 GB or more | NVIDIA Nemotron 3.5 Lightning (`nemotron-3.5-lightning:30b-a3b`) | 25 GB |
+| Windows or Linux PC with 32 GB or more | NVIDIA Nemotron 3.5 Lightning (`nemotron-3.5-lightning:30b-a3b`) | 25 GB |
 | Mac or PC with 16-31 GB | IBM Granite 4.2 8B (`granite4.2:8b`) | 6 GB |
 
 Nemotron Super needs 128 GB because macOS lets the graphics side use only about three quarters of memory.
@@ -135,8 +182,21 @@ python3 chat.py "How long is fridge food safe in a blackout?"   # terminal; --mo
 The library is looked up at `$SURVIVAL_LLM_LIBRARY`, then `~/Survival LLM Library`, then `library.noindex/` next to the code.
 Without a built-in engine, the app uses an Ollama you have installed (`ollama serve`).
 
+For a native Linux window from source, use a virtual environment and explicitly install the Qt backend:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install 'pywebview[qt]==6.2.1' pypdf truststore
+.venv/bin/python app/server.py
+```
+
+Linux uses the same model choices as Windows. Removing a personal file sends it to your desktop's Trash using
+`gio trash` or `trash-put` (trash-cli); if neither is installed, the app keeps the file and reports the problem.
+
 `python3 tests/run_all.py` checks memory and the handling of what models write (forget requests, notes about different
-people, Sources lines), with a stand-in for the model: no Ollama or library needed. Run it after changing `memory.py` or
+people, Sources lines), with a stand-in for the model. On Linux it also checks settings paths, model selection,
+Trash handling, desktop registration, update validation and rollback: no Ollama, library or display needed.
+Run it after changing `memory.py` or
 `core.py`, and `evals/memory_eval.py --step MODEL ...` to see how real models do.
 
 ## Try changes as the Mac app
@@ -185,7 +245,8 @@ Packs carry a date (`--version`, default today); installed copies offer a pack w
 ## Package the apps
 
 ```bash
-packaging/build.sh     # dist/Survival-LLM-mac.zip and dist/Survival-LLM-windows.zip (needs Xcode's command-line tools)
+packaging/build.sh     # on Mac: Mac + Windows zips (needs Xcode's command-line tools); on Linux: the native Linux zip
+packaging/build.sh linux  # on Linux: dist/Survival-LLM-linux-<host architecture>.zip (needs curl, tar, zip)
 gh release create "v$(cat packaging/VERSION)" dist/Survival-LLM-mac.zip dist/Survival-LLM-windows.zip
 python3 packaging/make_update.py "What's new" "..."   # writes docs/update.json; publish docs/ afterwards
 ```
@@ -195,6 +256,22 @@ download the zip for their system, check its size and SHA-256, and replace thems
 
 The Mac app bundles a portable Python, pywebview for its window, and Ollama. The Windows app bundles Python and
 pywebview and downloads Ollama on first use (it is 1.6 GB with its graphics-card libraries).
+Build Linux packages on each Linux architecture (`uname -m`: `x86_64` or `aarch64`), then copy their zips into
+`dist/` alongside the Mac and Windows zips before running `make_update.py`. Linux builds use the host architecture;
+they do not cross-compile. The first build downloads Python and the Qt dependencies, so it needs internet.
+`make_update.py` includes each available Linux package under its own architecture key (`linux-x86_64` or
+`linux-aarch64`); leave out packages that have not been built and verified.
+Upload those zips to the same release too, for example:
+
+```bash
+gh release upload "v$(cat packaging/VERSION)" dist/Survival-LLM-linux-*.zip
+```
+
+Linux updates replace the extracted application folder after it quits,
+preserve executable permissions, and keep settings, models, library and personal files outside the application.
+Before publishing a Linux build, check its native window on a desktop session and verify setup with Ollama.
+The x86_64 package has been built and smoke-tested for Qt imports and localhost startup; ARM64 and visual desktop
+testing still need verification.
 
 ## License
 
