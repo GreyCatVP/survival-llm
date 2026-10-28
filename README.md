@@ -5,6 +5,8 @@ internet. Ask it how to keep food safe in a blackout, treat a burn or purify wat
 offline library of medical, emergency, how-to and encyclopedia articles, answers from what it finds,
 and shows you the exact passage each answer came from.
 
+Runs on **macOS, Windows and Linux**. Installation: [Mac](#macos) · [Windows](#windows) · [Linux](#linux).
+
 - **Offline and private.** The AI model and the library live on your computer. Your questions never leave it, and once set up it works with the internet off.
 - **Shows its sources.** Every answer lists the articles it read; click one to read it yourself, cited passage highlighted, with its license. Ask "where did you get that?" and it opens the source.
 - **Shows its reasoning.** Show reasoning, under each answer, opens what the AI thought before it answered, step by step, with the searches and articles it read in between. It stays hidden until you click it. Most models reason first only when Think harder is ticked; Qwen always does.
@@ -19,18 +21,27 @@ and shows you the exact passage each answer came from.
 Do this while you have internet. After that, it needs none. Setup takes 20 minutes to about 2½ hours, depending on
 your computer and internet speed (the biggest AI model is 80 GB); you only click for about 5 minutes.
 
-**Mac** (Apple Silicon, macOS 14 Sonoma or newer)
+### macOS
+
+Apple Silicon, macOS 14 Sonoma or newer.
+
 1. Download `Survival-LLM-mac.zip` and double-click it to unzip. Move **Survival LLM** to Applications if you like.
 2. Double-click **Survival LLM**. The first time, macOS says it can't verify the app, because it isn't sold through
    Apple. Click **Done**, open **System Settings > Privacy & Security**, scroll down to "Survival LLM was blocked",
    click **Open Anyway**, and confirm with your password. You only do this once.
 
-**Windows** (10 or 11, 64-bit)
+### Windows
+
+Windows 10 or 11, 64-bit.
+
 1. Download `Survival-LLM-windows.zip`, right-click it and choose **Extract All**. (Running it from inside the zip doesn't work.)
 2. Open the extracted **Survival LLM** folder and double-click **Survival LLM.bat**. If Windows says it protected
    your PC, click **More info**, then **Run anyway**.
 
-**Linux** (64-bit x86_64 or ARM64, a modern glibc desktop distribution)
+### Linux
+
+64-bit x86_64 or ARM64, a modern glibc desktop distribution.
+
 1. Install [Ollama for Linux](https://ollama.com/download/linux) while you have internet. The app uses its local
    service, or starts `ollama serve` if `ollama` is on your PATH.
 2. Download `Survival-LLM-linux-x86_64.zip` or `Survival-LLM-linux-aarch64.zip` for your computer from the
@@ -47,6 +58,18 @@ needs your distribution's desktop libraries. On Ubuntu 24.04, install missing li
 Package names differ on other distributions. Alpine/musl is not supported by the portable build.
 `./survival-llm --browser` opens it in your browser instead; `--no-browser` runs the local server without a window.
 Logs from application-menu launches are in `${XDG_STATE_HOME:-~/.local/state}/survival-llm/app.log`.
+
+To build and launch the Linux package from a checkout of this repository:
+
+```bash
+packaging/build.sh linux
+./dist/linux-$(uname -m)/"Survival LLM"/survival-llm
+```
+
+The build needs `curl`, `tar`, `zip` and internet access. Install Ollama and the desktop libraries listed above
+before launching. To run directly from Python instead, see [Run from source](#run-from-source).
+
+### Finish setup (all platforms)
 
 **Then** the app opens in its own window and walks you through setup:
 1. **AI engine:** built into the Mac app. On Windows, one click downloads it (Ollama, 1.6 GB). On Linux, uses your installed Ollama.
