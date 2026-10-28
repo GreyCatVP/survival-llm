@@ -245,6 +245,10 @@ ID_REMARK = re.compile(r"[ \t]*[(\[]\s*(?:passage\s+)?ids?\s*:?\s*\d{5,}(?:\s*(?
 LOOKUP_PREAMBLE = re.compile(r"(?:let me|i'll|i will|i need to|i should|now i|next,? i|first,? i)\b[^\n]{0,200}?"
                              r"\b(?:search|look|check|read|open|find)\b[^\n]{0,200}$", re.I)
 INLINE_SOURCES = re.compile(r"([.!?])[ \t]+((?:\*\*)?Sources?(?:\*\*)?:[^\n]*?)\s*\Z")
+# A Sources line made of tool calls ("Sources: search_library (generator carbon monoxide garage), read_article (...)"),
+# written out instead of looking anything up: Lightning opened an answer with one in the 0.3.1 Windows test.
+TOOL_SOURCES = re.compile(r"^[*_# ]*Sources?\b[^\n]*\b(?:search_library|read_article|show_article)\b[^\n]*(?:\n|\Z)",
+                          re.IGNORECASE | re.MULTILINE)
 # Said before the last round, after the lookups run out. Without it some models (Granite) answer the last
 # round with yet another lookup written out as text, and the person gets no answer at all.
 FINAL_NUDGE = ("(Note from the app, not the person: you have used all your library lookups. Answer the question "
@@ -374,6 +378,7 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
         # or "Let me check one more source." before a lookup it wasn't given: nothing to show.
         answer, unfinished = "", True
     elif library:
+        answer = TOOL_SOURCES.sub("", answer).strip("\n")  # the Sources line added below says what it really read
         # The model names the sources it used, and the screen shows every article it opened. Models still name sources
         # they never opened (evals/citation_check.py), so a Sources line that does is replaced by what it read.
         if read:
@@ -459,13 +464,21 @@ def memory_check(model, messages, memory, think, options):
     plan = memory_plan("".join(reply))
     words = _stems(said[-1] if said else "")
     copied = lambda note: note.strip().lower() in EXAMPLE_NOTES and not _stems(note) <= words  # noqa: E731
-    plan["remember"] = [n for n in plan["remember"] if not copied(n)]  # an example's note, not the person's
-    plan["change"] = [c for c in plan["change"] if not copied(c["new"])]
+    asked = lambda note: _is_question(note, said[-1] if said else "")  # noqa: E731
+    plan["remember"] = [n for n in plan["remember"] if not copied(n) and not asked(n)]  # not a fact about them
+    plan["change"] = [c for c in plan["change"] if not copied(c["new"]) and not asked(c["new"])]
     for event in memory.apply(forgets(plan, said[-1] if said else "", memory.notes())):
         changed = True
         yield event
     if not changed and asked_memory(said[-1] if said else ""):
         yield {"type": "memory_unchanged"}  # they asked it to remember or forget something, and nothing changed
+
+
+def _is_question(note, said):
+    """Whether a note the model wants to keep is the person's question rather than a fact about them: Lightning saved
+    "Where can I safely run a generator?" both times it was asked (0.3.1 Windows test)."""
+    text, ask = note.strip(" \"'“”‘’"), said.strip(" \"'“”‘’")
+    return text.endswith("?") or (ask.endswith("?") and _stems(text) == _stems(ask))
 
 
 def memory_plan(reply):

@@ -292,7 +292,7 @@ a:focus-visible, button:focus-visible, select:focus-visible, summary:focus-visib
 .reasoning-head.plain { font-weight: 400; }
 .reasoning-note { font-size: 13px; margin-top: 2px; line-height: 1.45; }
 .reasoning-note:empty { display: none; }
-.reasoning-body { max-height: 60vh; overflow-y: auto; margin-top: 10px; }
+.reasoning-body { margin-top: 10px; }  /* no scroll box of its own: a scroll inside a scroll was cramped when narrow */
 .reasoning-body .r-row { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 12px; padding: 8px 0;
   border-top: 1px solid var(--line); }
 .reasoning-body .r-kind { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding-top: 2px; }

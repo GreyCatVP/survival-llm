@@ -716,6 +716,8 @@ def warm_model(model):
     """Load a model into memory ahead of the first question, so that question isn't slow."""
     if warming.get(model) == "loading" or model.removesuffix(":latest") in loaded_models():
         return
+    if DEV:  # restarted after every change, a dev copy would load the model each time (80 GB for Nemotron Super)
+        return
 
     def run():
         warming[model] = "loading"
@@ -1447,7 +1449,12 @@ if __name__ == "__main__":
     os.makedirs(APP_DIR, exist_ok=True)
     with open(STATE, "w") as f:
         json.dump({"port": PORT, "pid": os.getpid()}, f)
-    print(f"Survival LLM {VERSION}{f' (dev: {DEV})' if DEV else ''} is running at {url}", flush=True)
+    try:  # an update's download folder, left behind when Windows doesn't let go of it in time (0.3.1 Windows test)
+        os.rmdir(os.path.join(APP_DIR, "update"))
+    except OSError:
+        pass  # not there, or holding a download
+    print(f"{datetime.datetime.now():%Y-%m-%d %H:%M} Survival LLM {VERSION}{f' (dev: {DEV})' if DEV else ''} is running at "
+          f"{url}", flush=True)  # the date tells one run's lines in app.log from the next
     check_my_files()  # files put in the folder while the app was closed
     threading.Thread(target=auto_check_updates, daemon=True).start()
     try:

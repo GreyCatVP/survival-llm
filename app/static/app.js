@@ -449,11 +449,11 @@ async function ask(text) {
   const how = msg.querySelector(".how"), summary = how.querySelector("summary"), activity = how.querySelector(".activity");
   const answerEl = msg.querySelector(".answer"), meta = msg.querySelector(".meta"), sourcesEl = msg.querySelector(".sources");
   const started = Date.now();
-  let answer = "", queued = false, steps = 0, failed = false, answered = false;
+  let answer = "", queued = false, steps = 0, failed = false, answered = false, stopped = false;
   let thought = null, thoughts = 0, thoughtMs = 0, thinkSetting;  // thought: the stretch of reasoning streaming in now
   const remembered = msg.querySelector(".remembered"), changes = [];  // memory changes, announced together at the end
   const tick = setInterval(() => {
-    summary.textContent = `${nameOf(model)} is ${thought ? "thinking" : "working on it"}… ${Math.round((Date.now() - started) / 1000)} s`;
+    summary.textContent = `${nameOf(model)} is working on it… ${Math.round((Date.now() - started) / 1000)} s`;
   }, 1000);
   const render = () => { queued = false; answerEl.innerHTML = md(answer); scrollDown(); };
   const note = (label, id, howText) => {
@@ -470,9 +470,10 @@ async function ask(text) {
   const reasonHead = reasoning.querySelector(".reasoning-head"), reasonBody = reasoning.querySelector(".reasoning-body");
   const duration = (ms) => `${Math.max(1, Math.round(ms / 1000))} s`;
   const reasonStatus = (final) => {
-    const who = nameOf(model);
-    reasonHead.textContent = !final ? (thought ? `${who} is thinking…` : thoughts ? `${who}'s reasoning so far` : "No reasoning yet.")
-      : thoughts ? `${who}'s reasoning before it answered · ${duration(thoughtMs)}`
+    const who = nameOf(model);  // one title while it works (switching with each thought read as jumpy)
+    const until = answered ? "before it answered" : stopped ? "before you stopped it" : "so far";
+    reasonHead.textContent = !final ? (thoughts ? `${who}'s reasoning so far` : "No reasoning yet.")
+      : thoughts ? `${who}'s reasoning ${until} · ${duration(thoughtMs)} of thinking`
       : thinkSetting === false ? `${who} answered without reasoning first. Tick “Think harder” before you ask, and it reasons first (slower).`
       : thinkSetting === null ? `${who} doesn't reason before it answers, so there's nothing to show.`
       : "No reasoning to show for this answer.";
@@ -497,9 +498,7 @@ async function ask(text) {
   };
   const paintThought = (t) => {
     t.queued = false;
-    const box = reasonBody, pinned = box.scrollHeight - box.scrollTop - box.clientHeight < 24;  // follow it unless scrolled up
     t.el.innerHTML = md(t.text.trim());  // models write their reasoning in Markdown too
-    if (pinned) box.scrollTop = box.scrollHeight;
     if (!reasoning.hidden) scrollDown();
   };
   const think = (text) => {
@@ -601,7 +600,7 @@ async function ask(text) {
     else if (err.name === "AbortError" && answered) {
       failed = false;
       if (remembered.querySelector(".memory-checking")) memoryNote(remembered, "Stopped updating memory. Anything it already saved is in Memory.", true);
-    } else if (err.name === "AbortError") meta.textContent = "Stopped.";
+    } else if (err.name === "AbortError") { meta.textContent = "Stopped."; stopped = true; }
     else { meta.textContent = `Couldn't get an answer: ${err.message || err}`; meta.classList.add("error"); }
   } finally {
     clearInterval(tick);
