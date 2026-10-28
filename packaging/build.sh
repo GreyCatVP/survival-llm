@@ -6,9 +6,15 @@
 # Output: dist/Survival-LLM-mac.zip and dist/Survival-LLM-windows.zip
 #   build.sh mac   only the Mac app (dist/mac and its zip), as bin/dev --release runs it
 #   build.sh dev   only "Survival LLM Dev" in ~/Applications: the Mac app running the code in this folder (bin/dev)
+#   build.sh linux build a native portable Linux app on Linux (also the default when run on Linux)
 set -euo pipefail
 TARGET="${1:-all}"
-case "$TARGET" in all|mac|dev) ;; *) echo "usage: packaging/build.sh [mac|dev]" >&2; exit 2 ;; esac
+if [ "$#" -eq 0 ] && [ "$(uname -s)" = Linux ]; then TARGET=linux; fi
+case "$TARGET" in
+  linux) exec "$(dirname "$0")/build-linux.sh" ;;
+  all|mac|dev) ;;
+  *) echo "usage: packaging/build.sh [mac|dev|linux]" >&2; exit 2 ;;
+esac
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(dirname "$HERE")"

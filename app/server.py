@@ -55,7 +55,7 @@ TOKEN = secrets.token_urlsafe(16)
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
         ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png"}
 
-# Models the app offers. mac/win are Ollama names; min_ram is total memory in GB; gb is the download size.
+# Models the app offers. mac/win are Ollama names (Linux uses win too); min_ram is total memory in GB.
 # Picks and blurbs come from evals/retrieval_eval.py (22 blackout and first-aid questions answered with the library).
 CATALOG = [
     {"key": "nemotron-super", "name": "Nemotron 3.5 Super", "maker": "NVIDIA", "min_ram": 128,
@@ -108,7 +108,10 @@ elif sys.platform == "darwin":
 elif os.name == "nt":
     APP_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "Survival LLM")
 else:
-    APP_DIR = os.path.join(os.path.expanduser("~"), ".survival-llm")
+    # Keep settings from earlier source installs; new installs follow XDG.
+    legacy = os.path.join(os.path.expanduser("~"), ".survival-llm")
+    APP_DIR = legacy if os.path.isdir(legacy) else os.path.join(
+        os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "survival-llm")
 STATE = os.path.join(APP_DIR, "server.json")
 CUSTOM_PROMPT = os.path.join(APP_DIR, "instructions.txt")  # the person's own edit of the AI's instructions
 # The person's own files: a folder they can see, beside the library folder rather than in it (installing a library
@@ -273,7 +276,7 @@ def my_name(path):
 
 
 def to_trash(path):
-    """Move a file to the Trash (Mac) or Recycle Bin (Windows), so removing one of their files can be undone."""
+    """Move a file to the desktop's Trash or Recycle Bin, so removing it can be undone."""
     if sys.platform == "darwin":
         try:
             from Foundation import NSURL, NSFileManager  # part of pywebview's macOS dependencies
@@ -292,7 +295,13 @@ def to_trash(path):
         subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script], check=True, timeout=60,
                        env={**os.environ, "SURVIVAL_LLM_TRASH": path}, creationflags=0x08000000)  # no console window
     else:
-        os.remove(path)
+        # Never silently delete permanently when the UI promises Trash.
+        if shutil.which("gio"):
+            subprocess.run(["gio", "trash", "--", os.path.abspath(path)], check=True, capture_output=True, timeout=60)
+        elif shutil.which("trash-put"):
+            subprocess.run(["trash-put", "--", os.path.abspath(path)], check=True, capture_output=True, timeout=60)
+        else:
+            raise OSError("Couldn't move the file to Trash. Install gio (GLib) or trash-cli, then try again.")
 
 
 def open_folder(path):
@@ -749,7 +758,7 @@ def valid_update(data):
     if not isinstance(data, dict) or not isinstance(data.get("version"), str) \
             or not re.fullmatch(r"\d+(\.\d+){0,3}", data["version"]):
         return False
-    for key in ("mac", "windows"):
+    for key in ("mac", "windows", "linux-x86_64", "linux-aarch64"):
         pkg = data.get(key)
         if pkg is not None and not (isinstance(pkg, dict) and isinstance(pkg.get("bytes"), int)
                                     and re.fullmatch(r"(https://|http://127\.0\.0\.1:)\S+", str(pkg.get("url", "")))
@@ -826,7 +835,14 @@ def installed_pack():
 
 
 def platform_key():
-    return "mac" if sys.platform == "darwin" else "windows" if os.name == "nt" else None
+    if sys.platform == "darwin":
+        return "mac"
+    if os.name == "nt":
+        return "windows"
+    if sys.platform.startswith("linux"):
+        arch = {"amd64": "x86_64", "arm64": "aarch64"}.get(platform.machine().lower(), platform.machine().lower())
+        return "linux-" + arch if arch in ("x86_64", "aarch64") else None
+    return None
 
 
 def newer_app():
@@ -875,10 +891,13 @@ def original_path(path):
 
 
 def install_location():
-    """Where this copy of the app lives when it came from a download: the Mac app, or the Windows folder."""
+    """Where the downloaded app lives: a Mac bundle or a Windows/Linux portable folder."""
     if sys.platform == "darwin" and ROOT.endswith(os.path.join("Contents", "Resources", "app")):
         return original_path(os.path.dirname(os.path.dirname(os.path.dirname(ROOT))))
     if os.name == "nt" and os.path.isfile(os.path.join(os.path.dirname(ROOT), "Survival LLM.bat")):
+        return os.path.dirname(ROOT)
+    if sys.platform.startswith("linux") and os.path.isfile(os.path.join(os.path.dirname(ROOT), "survival-llm")) \
+            and os.path.isfile(os.path.join(ROOT, "version.txt")):
         return os.path.dirname(ROOT)
     return None
 
@@ -949,7 +968,12 @@ def app_update_worker(key):
         raise RuntimeError("The update was damaged in transit. Try again.")
     _update(key, status="unpacking", completed=pkg["bytes"], total=pkg["bytes"])
     where = install_location()
-    helper = install_mac(zip_path, where) if sys.platform == "darwin" else install_windows(zip_path, where)
+    if sys.platform == "darwin":
+        helper = install_mac(zip_path, where)
+    elif os.name == "nt":
+        helper = install_windows(zip_path, where)
+    else:
+        helper = install_linux(zip_path, where)
     os.remove(zip_path)
     try:
         os.rmdir(work)
@@ -986,6 +1010,50 @@ def install_mac(zip_path, bundle):
     wait = ('n=0; while kill -0 "$1" 2>/dev/null; do n=$((n+1)); [ $n -gt 300 ] && kill -9 "$1"; sleep 0.2; done; '
             'sleep 0.5; open "$2"')  # a minute at most, then it stops the old copy
     return {"cmd": ["/bin/sh", "-c", wait, "survival-llm-update", str(os.getpid()), bundle]}
+
+
+def install_linux(zip_path, folder):
+    """Stage a portable Linux build; swap only after the running app exits."""
+    staging = os.path.join(os.path.dirname(folder), ".survival-llm-update-" + uuid.uuid4().hex)
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            for entry in z.infolist():
+                target = os.path.abspath(os.path.join(staging, entry.filename))
+                if os.path.commonpath([os.path.abspath(staging), target]) != os.path.abspath(staging):
+                    raise RuntimeError("The update contains an invalid file path.")
+                z.extract(entry, staging)
+                # ZipFile doesn't restore executable permissions. Build archives contain regular files,
+                # including dereferenced Python symlinks, so don't recreate arbitrary links here.
+                if not entry.is_dir():
+                    os.chmod(target, 0o755 if (entry.external_attr >> 16) & 0o111 else 0o644)
+        new = os.path.join(staging, "Survival LLM")
+        for name in ("survival-llm", "python/bin/python3", "app/app/server.py", "app/version.txt"):
+            if not os.path.isfile(os.path.join(new, name)):
+                raise RuntimeError("The update didn't contain the app, so it wasn't installed.")
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    # The shell lives outside either build. Paths are positional arguments, never shell source.
+    swap = '''
+while kill -0 "$1" 2>/dev/null; do sleep 0.2; done
+if mv -- "$2" "$4"; then
+    if mv -- "$3" "$2"; then
+        rm -rf -- "$5"
+    elif mv -- "$4" "$2"; then
+        printf '%s\\n' 'Could not install the update; restored the previous version.' > "$6"
+        rm -rf -- "$5"
+    else
+        printf 'Could not restore the previous version. It is saved in %s\\n' "$4" > "$6"
+        exit 1
+    fi
+else
+    printf '%s\\n' 'Could not move the old app; update was not installed.' > "$6"
+    rm -rf -- "$5"
+fi
+exec "$2/survival-llm"
+'''
+    return {"cmd": ["/bin/sh", "-c", swap, "survival-llm-update", str(os.getpid()), folder, new,
+                    os.path.join(staging, "old"), staging, UPDATE_FAILED]}
 
 
 WINDOWS_SWAP = """# Run by a copy of Survival LLM that is updating itself on Windows: wait for it to quit, swap in the new folder
