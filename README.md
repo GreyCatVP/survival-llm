@@ -44,9 +44,10 @@ Windows 10 or 11, 64-bit.
 
 1. Install [Ollama for Linux](https://ollama.com/download/linux) while you have internet. The app uses its local
    service, or starts `ollama serve` if `ollama` is on your PATH.
-2. Download `Survival-LLM-linux-x86_64.zip` or `Survival-LLM-linux-aarch64.zip` for your computer from the
-   [releases page](https://github.com/anonnerdfrenzy/survival-llm/releases), when available. If the release has no
-   Linux package yet, build one from this repository with `packaging/build.sh linux` (see below).
+2. For x86_64, [download the Linux preview](https://github.com/lord3nd3r/survival-llm/releases/download/v0.3.3-linux.1/Survival-LLM-linux-x86_64.zip)
+   from [this fork's Linux release](https://github.com/lord3nd3r/survival-llm/releases/tag/v0.3.3-linux.1).
+   ARM64 packages have not been published; build one with `packaging/build.sh linux` on an ARM64 Linux computer
+   (see below). The upstream Mac and Windows releases do not include Linux yet.
    Extract the zip into a folder you can write to. Open a terminal in the extracted **Survival LLM** folder and run
    `./survival-llm`. If your archive manager did not preserve permissions, run `chmod +x survival-llm` first.
 3. Optionally run `./survival-llm --install-desktop` to add it to your application menu. Keep the folder in place;

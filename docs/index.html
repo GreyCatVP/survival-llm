@@ -83,7 +83,7 @@
     <div class="buttons">
       <a class="btn" id="dl-mac" href="#download">Download for Mac <span class="size">212 MB</span></a>
       <a class="btn" id="dl-win" href="#download">Download for Windows <span class="size">25 MB</span></a>
-      <a class="btn secondary" id="dl-linux" href="#linux">Linux</a>
+      <a class="btn secondary" id="dl-linux" href="https://github.com/lord3nd3r/survival-llm/releases/download/v0.3.3-linux.1/Survival-LLM-linux-x86_64.zip">Download for Linux <span class="size">x86_64 preview</span></a>
       <a class="btn secondary" id="dl-src" href="#source">Source code</a>
     </div>
     <p class="small" id="device-note">Free and open source. Set it up while you have internet; after that it needs none.</p>
@@ -121,11 +121,12 @@
     and modern 64-bit Linux desktops (x86_64 or ARM64).</p>
 
   <h2>Set it up in three steps</h2>
-  <p id="linux"><strong>Linux:</strong> build the native package with <code>packaging/build.sh linux</code>,
-    or download the package for your architecture when available on the <a id="linux-releases" href="#source">releases page</a>.
+  <p id="linux"><strong>Linux:</strong> download the x86_64 preview from
+    <a id="linux-releases" href="https://github.com/lord3nd3r/survival-llm/releases/tag/v0.3.3-linux.1">this fork's Linux release</a>.
+    ARM64 users can build the native package on their computer with <code>packaging/build.sh linux</code>.
     Install Ollama separately, extract the app and run <code>./survival-llm</code>.
     Run <code>./survival-llm --install-desktop</code> to add it to your application menu.
-    See the <a id="linux-guide" href="#source">Linux installation instructions</a> for desktop dependencies.</p>
+    See the <a id="linux-guide" href="https://github.com/lord3nd3r/survival-llm#linux">Linux installation instructions</a> for desktop dependencies.</p>
   <p>Setup takes 20 minutes to about 2½ hours, depending on your computer and your internet speed. You only click for
     about 5 minutes; the rest is downloading.</p>
   <ol class="steps">
@@ -218,6 +219,8 @@
 </main>
 <script>
   const REPO = "https://github.com/anonnerdfrenzy/survival-llm";
+  const LINUX_REPO = "https://github.com/lord3nd3r/survival-llm";
+  const LINUX_TAG = "v0.3.3-linux.1";
   const LINKS = {
     mac: REPO + "/releases/latest/download/Survival-LLM-mac.zip",
     windows: REPO + "/releases/latest/download/Survival-LLM-windows.zip",
@@ -226,8 +229,9 @@
   const set = (id, url) => { const el = document.getElementById(id); if (el && url) el.href = url; };
   set("dl-mac", LINKS.mac); set("dl-mac-2", LINKS.mac);
   set("dl-win", LINKS.windows); set("dl-win-2", LINKS.windows);
-  set("linux-releases", LINKS.repo + "/releases");
-  set("linux-guide", LINKS.repo + "/blob/main/README.md#install");
+  set("dl-linux", LINUX_REPO + "/releases/download/" + LINUX_TAG + "/Survival-LLM-linux-x86_64.zip");
+  set("linux-releases", LINUX_REPO + "/releases/tag/" + LINUX_TAG);
+  set("linux-guide", LINUX_REPO + "/blob/main/README.md#linux");
   set("tests-link", LINKS.repo + "#how-the-models-did");
   set("dl-src", LINKS.repo); set("repo-link", LINKS.repo); set("sources-link", LINKS.repo + "/blob/main/SOURCES.md");
   set("releases-link", LINKS.repo + "/releases");
