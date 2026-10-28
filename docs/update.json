@@ -1,20 +1,19 @@
 {
- "version": "0.3.2",
+ "version": "0.3.3",
  "date": "2026-10-27",
  "notes": [
-  "New since 0.3.0: Show reasoning under each answer, to see what the AI thought before it answered and what it looked up.",
-  "Fixes the AI saving your question as a memory note.",
-  "Fixes a made-up Sources line at the top of some answers.",
-  "Show reasoning is clearer after you press Stop, steadier while it works, and long reasoning scrolls with the page."
+  "Mac: quitting with Cmd+Q now also stops the AI engine and frees the memory its model used.",
+  "Library search no longer shows several copies of the same page.",
+  "New since 0.3.0: Show reasoning under each answer, to see what the AI thought before it answered and what it looked up."
  ],
  "mac": {
-  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.2/Survival-LLM-mac.zip",
-  "bytes": 212811851,
-  "sha256": "21e4c0da80441881a100077b076d6220a73264186257a55bb05f03b3428177c3"
+  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.3/Survival-LLM-mac.zip",
+  "bytes": 212812095,
+  "sha256": "b603be33ec8471d31866c4acba7d3d1a54271840d8bca02c96cd2990457b2150"
  },
  "windows": {
-  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.2/Survival-LLM-windows.zip",
-  "bytes": 25219584,
-  "sha256": "8885fb3c06405c33222bfe0f2f387e455f45d2e74f5c277164da38b69a59c2ff"
+  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.3/Survival-LLM-windows.zip",
+  "bytes": 25219834,
+  "sha256": "70aed1b62ecdf356bee68cc77f0a67c46e56bdd321799382f6ec59bd4a1c5179"
  }
 }
