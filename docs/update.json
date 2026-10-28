@@ -1,17 +1,20 @@
 {
- "version": "0.3.1",
+ "version": "0.3.2",
  "date": "2026-10-27",
  "notes": [
-  "Show reasoning: under each answer, see what the AI thought before it answered and what it looked up in between. Most models reason first only when Think harder is ticked; Qwen always does."
+  "New since 0.3.0: Show reasoning under each answer, to see what the AI thought before it answered and what it looked up.",
+  "Fixes the AI saving your question as a memory note.",
+  "Fixes a made-up Sources line at the top of some answers.",
+  "Show reasoning is clearer after you press Stop, steadier while it works, and long reasoning scrolls with the page."
  ],
  "mac": {
-  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.1/Survival-LLM-mac.zip",
-  "bytes": 212811340,
-  "sha256": "7f36feb19b95983f42da2e9ee807b2b1270fdda23e586caeb0d7df6693b721b0"
+  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.2/Survival-LLM-mac.zip",
+  "bytes": 212811851,
+  "sha256": "21e4c0da80441881a100077b076d6220a73264186257a55bb05f03b3428177c3"
  },
  "windows": {
-  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.1/Survival-LLM-windows.zip",
-  "bytes": 25219075,
-  "sha256": "9016497368d7ea8180b6cda9a6649ed062e8306c855cbce7211c49434678bf0b"
+  "url": "https://github.com/anonnerdfrenzy/survival-llm/releases/download/v0.3.2/Survival-LLM-windows.zip",
+  "bytes": 25219584,
+  "sha256": "8885fb3c06405c33222bfe0f2f387e455f45d2e74f5c277164da38b69a59c2ff"
  }
 }
