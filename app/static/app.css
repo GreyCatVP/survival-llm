@@ -309,3 +309,5 @@ a:focus-visible, button:focus-visible, select:focus-visible, summary:focus-visib
 /* a dev copy (bin/dev), so it can't be mistaken for the real app */
 .dev-badge { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #fff;
   background: #5b4bc4; border-radius: 5px; padding: 1px 7px; }
+.length-note { margin: 8px auto 0 !important; padding: 6px 12px; border-radius: 10px; font-size: 13px;
+  background: var(--cite); border: 1px solid var(--cite-line); }

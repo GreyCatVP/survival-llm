@@ -232,20 +232,35 @@ evs = ask(msgs, "My plan?", [("call", "read_article", {"id": 1777777}), ("call",
 check("unseen id refused", [e["title"] for e in evs if e["type"] == "read"] == ["Water storage"],
       [e.get("title") for e in evs if e["type"] == "read"])
 
-# last-round calls are not run; an echoed error isn't shown
+# last-round calls are not run; an echoed error isn't shown. Since 0.3.4 (issue #2) such an answer gets one more try,
+# with the best passages its searches found; only if that fails too is there nothing to show.
 msgs = [{"role": "system", "content": "sys"}]
 steps = [("call", "search_library", {"query": f"water {i}"}) for i in range(core.MAX_TOOL_ROUNDS)]
 steps.append(("call", "read_article", {"id": "abc"}))
-evs = ask(msgs, "Water?", steps)
-check("last-round call dropped, unfinished", done(evs)["unfinished"] and msgs[-1]["role"] == "assistant",
-      (done(evs), msgs[-1]["role"]))
+evs = ask(msgs, "Water?", steps + [("say", "Boil it for one minute.")])
+check("last-round call dropped: answered from the passages it found",
+      not done(evs)["unfinished"] and done(evs)["answer"].startswith("Boil it for one minute.")
+      and msgs[-1] == {"role": "assistant", "content": "Boil it for one minute."}, (done(evs), msgs[-1]))
+check("the passages it was given show as read, before the retry",
+      [e["type"] for e in evs if e["type"] in ("read", "retry")] == ["read"] * 4 + ["retry"],
+      [e["type"] for e in evs])
+check("the discarded text is kept for the logs", done(evs)["discarded"] == "", done(evs)["discarded"])
+evs = ask([{"role": "system", "content": "sys"}], "Water?",
+          steps + [("say", '<tool_call>{"name": "search_library"}')])
+check("last-round call dropped and the second try fails too: unfinished",
+      done(evs)["unfinished"] and done(evs)["answer"] == "", done(evs))
 steps = [("call", "search_library", {"query": f"water {i}"}) for i in range(core.MAX_TOOL_ROUNDS)]
 steps.append(("call", "search_library", {"query": "more"}, "Let me check one more source on boiling times."))
-evs = ask([{"role": "system", "content": "sys"}], "Water?", steps)
-check("review 5: preamble before a dropped call is unfinished", done(evs)["unfinished"], done(evs)["answer"])
+evs = ask([{"role": "system", "content": "sys"}], "Water?", steps + [("say", "Let me check one more source.")])
+check("review 5: preamble before a dropped call, twice, is unfinished", done(evs)["unfinished"], done(evs)["answer"])
 evs = ask([{"role": "system", "content": "sys"}], "Water?",
-          [("call", "search_library", {"query": "water"}), ("say", core.NO_PASSAGE)])
-check("echoed tool error is unfinished, answer empty", done(evs)["unfinished"] and done(evs)["answer"] == "", done(evs))
+          [("call", "search_library", {"query": "water"}), ("say", core.NO_PASSAGE), ("say", core.NO_PASSAGE)])
+check("echoed tool error, twice, is unfinished, answer empty", done(evs)["unfinished"] and done(evs)["answer"] == "",
+      done(evs))
+evs = ask([{"role": "system", "content": "sys"}], "Water?",
+          [("call", "search_library", {"query": "water"}), ("say", core.NO_PASSAGE), ("say", "Store a gallon a day.")])
+check("echoed tool error, then an answer from the passages", done(evs)["answer"].startswith("Store a gallon a day."),
+      done(evs)["answer"])
 
 
 def answer_for(text, read_ids=(1403312,), seen_q="water"):
@@ -344,7 +359,8 @@ class Mem:
         return iter(())
 for q, steps in [("Delete the note about the generator.", [("say", "OK.")]),
                  ("Stop remembering the cats.", [("say", "OK.")]),
-                 ("Remember that I have type 1 diabetes.", [("call", "search_library", {"query": "diabetes"}), ("say", "")])]:
+                 ("Remember that I have type 1 diabetes.", [("call", "search_library", {"query": "diabetes"}), ("say", ""),
+                                                            ("say", "")])]:  # the empty answer gets a second try
     mm = Mem()
     script[:] = list(steps) + [("say", '{"forget": [], "change": [], "remember": []}')]
     msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": q}]

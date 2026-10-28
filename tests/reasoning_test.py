@@ -80,13 +80,13 @@ def script():
             [thinking("It says never in a garage."), say(ANSWER[:20]), say(ANSWER[20:])]]
 
 
-def ask(q="Can I run a generator in the garage?", model="nemotron", caps=frozenset({"tools", "thinking"}), deep=False,
+def ask(q="Can I run a generator in the garage?", model="nemotron", caps=frozenset({"tools", "thinking"}), reasoning="off",
         memory=None):
     rounds[:] = script() + ([[thinking("Secret memory thoughts."), say('{"forget": [], "change": [], "remember": []}')]]
                             if memory else [])
     thinks.clear()
     messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": q}]
-    return list(core.chat_events(model, Lib(), messages, deep=deep, caps=set(caps), memory=memory)), messages
+    return list(core.chat_events(model, Lib(), messages, reasoning=reasoning, caps=set(caps), memory=memory)), messages
 
 
 evs, messages = ask()
@@ -106,7 +106,11 @@ check("the saved chat keeps no reasoning", "search the library" not in saved and
 
 # What it was asked: no reasoning (False), reasoning (True or a level), or a model that can't (None)
 check("think: False by default for Nemotron", done["think"] is False, done["think"])
-check("think: True with Think harder", next(e for e in ask(deep=True)[0] if e["type"] == "done")["think"] is True)
+check("think: True with Reasoning above Off", next(e for e in ask(reasoning="medium")[0] if e["type"] == "done")["think"] is True)
+for model, reasoning, want in [("qwen3.8:27b", "short", "low"), ("qwen3.8:27b", "long", "xhigh"), ("qwen3.8:27b", "none", "xhigh"),
+                               ("nemotron", "long", True), ("nemotron", "none", True), ("nemotron", "short", True)]:
+    got = core.think_setting(model, {"thinking"}, reasoning)
+    check(f"think_setting({model}, {reasoning}) == {want!r}", got == want, got)
 check("think: Qwen's brief think by default", next(e for e in ask(model="qwen3.8:27b")[0] if e["type"] == "done")["think"] == "low")
 check("think: None for a model that can't reason",
       next(e for e in ask(caps={"tools"})[0] if e["type"] == "done")["think"] is None)
@@ -131,7 +135,7 @@ out = io.StringIO()
 with contextlib.redirect_stdout(out):
     used, reasoning = chat.run_turn("nemotron", Lib(), [{"role": "system", "content": "s"},
                                                         {"role": "user", "content": "Generator in the garage?"}],
-                                    False, {"tools", "thinking"})
+                                    "off", {"tools", "thinking"})
 printed = out.getvalue()
 check("terminal: the reasoning isn't printed", "search the library" not in printed and "Ready.gov result" not in printed,
       printed)
@@ -145,7 +149,7 @@ check("terminal: still returns the sources", [s["title"] for s in used] == ["Gen
 rounds[:] = [[say("Boil it for one minute.")]]
 with contextlib.redirect_stdout(io.StringIO()):
     _, reasoning = chat.run_turn("nemotron", None, [{"role": "system", "content": "s"},
-                                                    {"role": "user", "content": "Water?"}], False, set())
+                                                    {"role": "user", "content": "Water?"}], "off", set())
 check("terminal: no reasoning, nothing for /reasoning", reasoning == "", reasoning)
 
 print(f"\n{len(FAILS)} failed" if FAILS else "\nall passed")

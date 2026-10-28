@@ -172,6 +172,17 @@
   <h2 id="updates">Update notes</h2>
   <p>Already have it? Click <em>Check for updates</em> at the bottom of the app.</p>
   <div class="update">
+    <h3>0.3.4 <span class="date">October 27, 2026</span></h3>
+    <ul>
+      <li><strong>Reasoning setting:</strong> next to Send, choose how much the AI may think before it answers: Off,
+        1,000, 4,000 or 16,000 tokens, or no limit. At the limit its thinking stops and it answers from what it has, so
+        a model stuck reasoning in circles still answers. It replaces "Think harder".</li>
+      <li>When the AI looked things up but never wrote an answer, it now gets the best articles it found and tries once
+        more, instead of showing nothing. Thanks to betsyisaac for finding this.</li>
+      <li>Ask it to look something up and it searches the library, even if it first answered from memory. Answers say
+        whether they came from memory, from articles it read, or from search results it didn't open.</li>
+      <li>A warning when Reasoning or Length limit is set to no limit.</li>
+    </ul>
     <h3>0.3.3 <span class="date">October 27, 2026</span></h3>
     <ul>
       <li>Mac: quitting with Cmd+Q now also stops the AI engine and frees the memory its model used. Before, it kept

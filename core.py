@@ -19,6 +19,10 @@ MAX_TOOL_ROUNDS = 6
 # stuck repeating itself would otherwise run, and drain the battery, until someone noticed (Qwen 3.6 once went an
 # hour on one question). With no limit, only the Stop button ends a stuck answer.
 LENGTH_LIMITS = {"normal": 8192, "long": 32768, "none": -1}
+# How much it may reason before it answers, set by the person's "Reasoning" setting: tokens of reasoning in one round,
+# after which its reasoning is cut and it has to answer from what it has (-1 = no limit). A model reasoning in circles
+# would otherwise go on until the length limit and never answer. "off" asks it not to reason at all.
+REASONING_LIMITS = {"off": 0, "short": 1000, "medium": 4000, "long": 16000, "none": -1}
 
 BASE_PROMPT = """You are an offline assistant running entirely on this computer, with no internet access: you can't go online, call or contact anyone for the person. The person asking may be dealing with a power outage or another emergency, possibly running on battery."""
 
@@ -63,9 +67,10 @@ TOOLS = [
             "required": ["id"]}}},
 ]
 
-# Thinking: Qwen drafts an answer before it searches when thinking is fully off, so it gets a brief think.
-THINK_DEFAULT = {"qwen": "low"}
-THINK_DEEP = {"qwen": "xhigh"}
+# Qwen drafts an answer before it searches when its reasoning is fully off, so with Reasoning off it still gets a brief
+# think (held to the short limit); Qwen's highest effort goes with the long and unlimited settings.
+THINK_OFF = {"qwen": "low"}
+THINK_LONG = {"qwen": "xhigh"}
 SAMPLING = {
     "qwen": {"temperature": 0.7, "top_p": 0.8, "top_k": 20},
     "nemotron": {"temperature": 0.7, "top_p": 0.95},
@@ -105,11 +110,16 @@ def capabilities(model):
     return set(_show(model).get("capabilities") or [])
 
 
-def think_setting(model, caps, deep=False):
+def think_setting(model, caps, reasoning="off"):
+    """Ollama's "think" for this model at this Reasoning setting: None for a model that can't reason, False for none."""
     if "thinking" not in caps:
         return None
     fam = family(model)
-    return (THINK_DEEP.get(fam, True) if deep else THINK_DEFAULT.get(fam, False))
+    if REASONING_LIMITS.get(reasoning, 0) == 0:
+        return THINK_OFF.get(fam, False)
+    if reasoning in ("long", "none"):
+        return THINK_LONG.get(fam, True)
+    return "low" if fam == "qwen" and reasoning == "short" else True
 
 
 def system_prompt(library, tools=True):
@@ -253,6 +263,18 @@ TOOL_SOURCES = re.compile(r"^[*_# ]*Sources?\b[^\n]*\b(?:search_library|read_art
 # round with yet another lookup written out as text, and the person gets no answer at all.
 FINAL_NUDGE = ("(Note from the app, not the person: you have used all your library lookups. Answer the question "
                "now from what you already read, and list your sources. Do not call any more tools.)")
+THINK_NUDGE = ("(Note from the app, not the person: you have reasoned long enough. Answer the question now from what "
+               "you already have, briefly, and list your sources.)")
+# When the person asks it to look something up and it answers from memory, it is asked once more, told to search.
+SEARCH_NUDGE = ("(Note from the app, not the person: they asked you to look this up. Search the library with "
+                "search_library before you answer.)")
+ASKED_SEARCH = re.compile(r"\b(?:look (?:it|that|this|them|those) up|look up|search (?:the library|for|it|that|this)|"
+                          r"check (?:the library|your sources|a source)|look (?:in|through) the library|"
+                          r"find (?:a|the|me a|some) sources?|what does the library say|in the library)\b", re.I)
+# Said with the best passages its searches found, when it looked things up but wrote no answer: Granite searched six
+# times for "A power line is down in my front yard" and then wrote another lookup instead of answering (issue #2).
+RESCUE_NOTE = ("(Note from the app, not the person: you can't look anything else up. Answer the question now from "
+               "these library excerpts and what you know, and list your sources.)")
 # After an answer, the model gets one short request of its own to update its notes about the person (memory.py).
 # Asked while answering, models put the question first and rarely saved anything; asked for tool calls after the
 # answer, Nemotron Super said "nothing to save" about "I have type 1 diabetes"; given the whole chat, Lightning lost
@@ -286,7 +308,7 @@ PERSONAL = re.compile(r"\b(i|i'm|im|i've|ive|i'd|my|me|mine|myself|we|we're|we'v
                       r"family|household|roommates?)\b", re.I)
 
 
-def chat_events(model, library, messages, deep=False, caps=None, length="normal", memory=None):
+def chat_events(model, library, messages, reasoning="off", caps=None, length="normal", memory=None):
     """Answer the last user message. Yields thinking/search/read/show/token/tick/done events (thinking and token
     events carry the model's reasoning and answer as they stream), then, with a memory the person lets the AI write
     to, memory_check and memory events from a short step after the answer."""
@@ -294,9 +316,15 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
     can_call = "tools" in caps
     tools = TOOLS if (library and can_call) else None
     question = messages[-1]["content"]
-    think = think_setting(model, caps, deep)
+    think = think_setting(model, caps, reasoning)
     limit = LENGTH_LIMITS.get(length, LENGTH_LIMITS["normal"])
-    options = {"num_ctx": 32768, "num_predict": limit * 2 if deep and limit > 0 else limit,
+    # With Reasoning off, a model that reasons anyway (Qwen's brief think) is held to the short limit.
+    think_cap = REASONING_LIMITS.get(reasoning, 0) or REASONING_LIMITS["short"]
+    test = _test_case()
+    if test.startswith("think-limit="):
+        think_cap = int(test.split("=", 1)[1])
+    # The length limit is for the answer: reasoning comes on top of it, since Ollama counts both.
+    options = {"num_ctx": 32768, "num_predict": -1 if limit < 0 or think_cap < 0 else limit + think_cap,
                **SAMPLING.get(family(model), {"temperature": 0.7})}
     sources, seen, tokens, seconds, cut_off, looked, unopened, named = {}, {}, 0, 0.0, False, False, [], None
     dropped = False
@@ -307,16 +335,25 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
         for event in attach_excerpts(library, messages):
             sources.setdefault(event["id"], {k: event.get(k) for k in ("title", "source", "official")})
             yield event
-    for round_no in range(MAX_TOOL_ROUNDS + 1):
-        use_tools = tools if round_no < MAX_TOOL_ROUNDS else None  # last round: must answer
-        nudged = bool(tools) and not use_tools
-        if nudged:
-            messages.append({"role": "user", "content": FINAL_NUDGE})
-        content, calls, final, held = [], [], {}, []
-        for chunk in _stream(model, messages, use_tools, think, options):
+    must_search = bool(tools) and bool(ASKED_SEARCH.search(question))  # they asked it to look something up
+    round_no, nudge = 0, None  # nudge: a note from the app for the next round
+    while True:
+        answer_now = nudge == THINK_NUDGE
+        use_tools = tools if round_no < MAX_TOOL_ROUNDS and not answer_now else None  # last round: must answer
+        if tools and not use_tools and not nudge:
+            nudge = FINAL_NUDGE
+        if nudge:
+            messages.append({"role": "user", "content": nudge})
+        content, calls, final, held, thought, over = [], [], {}, [], 0, False
+        stream = _stream(model, messages, use_tools, False if answer_now else think, options)
+        for chunk in stream:
             msg = chunk.get("message", {})
             if msg.get("thinking"):
                 yield {"type": "thinking", "text": msg["thinking"]}  # its reasoning, which the person can read
+                thought += 1  # it streams about a token at a time
+                if 0 < think_cap < thought and not content and not calls and not answer_now:
+                    over = True
+                    break
             elif not msg.get("content"):
                 yield {"type": "tick"}  # nothing to show: lets the server notice a closed page
             if msg.get("content"):
@@ -324,9 +361,9 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
                 # Some models write a tool call out as text before Ollama turns it into tool_calls; keep that
                 # markup off the screen, and hold back text that may still turn out to be the start of it.
                 text = "".join(content).lstrip()
-                if use_tools and text.startswith(TOOL_MARKUP):
+                if tools and text.startswith(TOOL_MARKUP):  # also on the last round, where it can't be run
                     yield {"type": "tick"}
-                elif use_tools and any(t.startswith(text) for t in TOOL_MARKUP):
+                elif tools and any(t.startswith(text) for t in TOOL_MARKUP):
                     held.append(msg["content"])
                 else:
                     yield {"type": "token", "text": "".join(held) + msg["content"]}
@@ -334,16 +371,27 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
             calls.extend(msg.get("tool_calls") or [])
             if chunk.get("done"):
                 final = chunk
+        if hasattr(stream, "close"):
+            stream.close()  # stops Ollama generating when the loop above ended early
+        sent, nudge = nudge, None
+        if sent:
+            messages.pop()  # keep the app's notes out of the saved conversation
+        if over:  # reasoning in circles: answer now from what it has, with no more reasoning or lookups
+            yield {"type": "think_limit", "limit": think_cap}
+            nudge = THINK_NUDGE
+            continue
         if held and not calls:
             yield {"type": "token", "text": "".join(held)}
         tokens += final.get("eval_count", 0)
         cut_off = cut_off or final.get("done_reason") == "length"
         seconds += final.get("eval_duration", 0) / 1e9
-        if nudged:
-            messages.pop()  # keep the note out of the saved conversation
         if not use_tools:
             dropped = bool(calls)
             calls = []  # the last round is for answering: a lookup asked for anyway isn't run
+        if must_search and use_tools and not looked and not calls:  # asked to look it up, it answered from memory
+            must_search, nudge = False, SEARCH_NUDGE
+            yield {"type": "retry", "why": "search"}  # what streamed so far isn't the answer
+            continue
         entry = {"role": "assistant", "content": "".join(content)}
         if calls:
             entry["tool_calls"] = calls
@@ -369,14 +417,25 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
                     seen.setdefault(hit["id"], {k: hit.get(k) for k in ("title", "source", "official")})
                 yield event
             messages.append({"role": "tool", "tool_name": fn.get("name"), "content": result})
-    answer, unfinished = messages[-1]["content"], False
+        round_no += 1
+    if test == "no-answer" and tools:  # as if it had written a lookup instead of its answer
+        messages[-1]["content"] = '<tool_call>{"name": "search_library"}</tool_call>'
+    answer, unfinished, discarded = messages[-1]["content"], False, None
+    # No answer: a lookup written out as text, or cut off inside one, nothing at all, a tool's error repeated as the
+    # answer, or "Let me check one more source." before a lookup it wasn't given.
+    no_answer = lambda text: text.lstrip().startswith(TOOL_MARKUP) or not text.strip() \
+        or text.strip().strip('"') in TOOL_ERRORS or bool(dropped and LOOKUP_PREAMBLE.match(text.strip()))  # noqa: E731
+    if tools and no_answer(answer):
+        discarded = answer  # kept for the eval logs
+        rescue = yield from _rescue(model, library, messages, question, sources, seen, options)
+        if rescue:
+            tokens, seconds, cut_off = tokens + rescue["tokens"], seconds + rescue["seconds"], cut_off or rescue["cut_off"]
+            if not no_answer(rescue["text"]):
+                answer = messages[-1]["content"] = rescue["text"]  # the saved chat keeps the answer it gave
     read = _one_per_article([{"id": k, **v} for k, v in sources.items()])
     found = _one_per_article(read + [{"id": k, **v} for k, v in seen.items()])  # read first, then the rest
-    if answer.lstrip().startswith(TOOL_MARKUP) or (looked and not answer.strip()) \
-            or answer.strip().strip('"') in TOOL_ERRORS or (dropped and LOOKUP_PREAMBLE.match(answer.strip())):
-        # A lookup written out as text, or cut off inside one, nothing at all, a tool's error repeated as the answer,
-        # or "Let me check one more source." before a lookup it wasn't given: nothing to show.
-        answer, unfinished = "", True
+    if no_answer(answer):
+        answer, unfinished = "", True  # nothing to show
     elif library:
         answer = TOOL_SOURCES.sub("", answer).strip("\n")  # the Sources line added below says what it really read
         # The model names the sources it used, and the screen shows every article it opened. Models still name sources
@@ -411,7 +470,7 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
             + answer[cut:]
     yield {"type": "done", "tokens": tokens, "seconds": seconds, "answer": answer, "cut_off": cut_off,
            "unfinished": unfinished, "unopened": unopened, "named": named if library and not unfinished else None,
-           "sources": read, "seen": found[len(read):], "think": think}
+           "sources": read, "seen": found[len(read):], "think": think, "discarded": discarded}
     # Only when they said something about themselves or their family, or asked it to remember or forget something: the
     # step takes a few seconds. Not after an answer cut off at the length limit, which "Keep going" continues. It reads
     # only what the person said, so an answer that didn't finish doesn't stop it.
@@ -420,6 +479,54 @@ def chat_events(model, library, messages, deep=False, caps=None, length="normal"
             yield from memory_check(model, messages, memory, think_setting(model, caps), options)
         except Exception:  # noqa: BLE001 - the answer is out; a failed memory step only means nothing new was saved
             yield {"type": "memory_failed"}
+
+
+def _test_case():
+    """A case a dev copy forces so it can be tried with a real model (bin/dev --test): "no-answer" (every answer comes
+    out as a lookup written as text) or "think-limit=N" (reasoning stops after N tokens). Ignored outside dev copies."""
+    case = os.environ.get("SURVIVAL_LLM_TEST", "") if os.environ.get("SURVIVAL_LLM_DEV") else ""
+    return case if case == "no-answer" or re.fullmatch(r"think-limit=\d+", case) else ""
+
+
+def _rescue(model, library, messages, question, sources, seen, options):
+    """It looked things up but wrote no answer: show it the best passages its searches found (what it read first, else
+    the top search results, else a search for the question) and ask once more, without tools or reasoning. Yields a
+    read event for each passage it is given; returns {"text", "tokens", "seconds", "cut_off"}, or None with nothing to
+    give it."""
+    picks = list(sources) + [pid for pid in seen if pid not in sources]
+    picks = picks or [h["id"] for h in library.search(question, limit=4)]
+    blocks = []
+    for pid in picks:
+        doc = library.read(pid, max_chars=2500)
+        if not doc:
+            continue
+        blocks.append(f"[{doc['title']} ({doc['source']})]\n{doc['text']}")
+        if pid not in sources:
+            sources[pid] = {k: doc[k] for k in ("title", "source", "official")}
+            yield {"type": "read", "id": pid, **sources[pid]}
+        if len(blocks) == 4:
+            break
+    if not blocks:
+        return None
+    yield {"type": "retry", "why": "excerpts"}  # what streamed so far isn't the answer
+    messages.append({"role": "user", "content": RESCUE_NOTE + "\n\n" + "\n\n".join(blocks)})
+    content, final = [], {}
+    try:
+        for chunk in _stream(model, messages, None, False, options):
+            msg = chunk.get("message", {})
+            if msg.get("thinking"):
+                yield {"type": "thinking", "text": msg["thinking"]}
+            if msg.get("content"):
+                content.append(msg["content"])
+                yield {"type": "token", "text": msg["content"]}
+            elif not msg.get("thinking"):
+                yield {"type": "tick"}
+            if chunk.get("done"):
+                final = chunk
+    finally:
+        messages.pop()  # the note and its excerpts stay out of the saved conversation
+    return {"text": "".join(content), "tokens": final.get("eval_count", 0),
+            "seconds": final.get("eval_duration", 0) / 1e9, "cut_off": final.get("done_reason") == "length"}
 
 
 # The notes in MEMORY_CHECK's examples: Granite once saved the generator-manual example's note for

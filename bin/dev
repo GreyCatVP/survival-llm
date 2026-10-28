@@ -7,6 +7,9 @@
                       models are still there). Every --fresh start begins from nothing again.
   bin/dev --release   build the Mac app exactly as it ships (packaging/build.sh mac) and run that build instead
   bin/dev --rebuild   build Survival LLM Dev again before opening it
+  bin/dev --test no-answer       force a case, to try it with a real model: every answer comes out blank, so the
+  bin/dev --test think-limit=60  app's second try runs; or its reasoning stops after 60 tokens
+  bin/dev --own-engine  start its own copy of the AI engine (as on a Mac without Ollama), to see Quit stop it
   bin/dev stop        quit it
   bin/dev reset       delete its settings, memory and files
   bin/dev log         follow its log
@@ -126,7 +129,14 @@ def start(app, profile, env):
 def main():
     sys.stdout.reconfigure(line_buffering=True)  # in order with build.sh's output
     args = sys.argv[1:]
-    if set(args) - {"--fresh", "--release", "--rebuild", "stop", "reset", "log"}:
+    test = None
+    if "--test" in args:  # a case to force, read by core.py in dev copies only
+        at = args.index("--test")
+        test = args[at + 1] if at + 1 < len(args) else ""
+        del args[at:at + 2]
+        if not re.fullmatch(r"no-answer|think-limit=\d+", test):
+            sys.exit("--test takes no-answer or think-limit=N, for example --test think-limit=60")
+    if set(args) - {"--fresh", "--release", "--rebuild", "--own-engine", "stop", "reset", "log"}:
         sys.exit(__doc__)
     if "log" in args:
         os.execvp("tail", ["tail", "-n", "40", "-f", LOGS[DEV_APP]])
@@ -149,11 +159,16 @@ def main():
     else:
         build("--rebuild" in args)
         app = DEV_APP
+    if test:
+        env["SURVIVAL_LLM_TEST"] = test
+    if "--own-engine" in args:  # no Ollama answers on this port, so the app starts the engine it carries
+        env.update(OLLAMA_HOST="127.0.0.1:11499", OLLAMA_NOPRUNE="1")  # NOPRUNE: a second engine mustn't prune models
     stop()
     if fresh:
         shutil.rmtree(FRESH, ignore_errors=True)
     print(f"Opening {'the release build' if app == RELEASE_APP else 'Survival LLM Dev'}: {label()}"
-          + (" (fresh: no library, memory, files or settings)" if fresh else ""))
+          + (" (fresh: no library, memory, files or settings)" if fresh else "")
+          + (f" (test: {test})" if test else "") + (" (its own engine)" if "--own-engine" in args else ""))
     start(app, profile, env)
 
 

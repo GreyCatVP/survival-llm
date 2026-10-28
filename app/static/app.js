@@ -4,7 +4,7 @@ const $ = (id) => document.getElementById(id);
 const els = {
   status: $("status"), modelName: $("model-name"), messages: $("messages"), welcome: $("welcome"),
   using: $("using"), setup: $("setup"), composer: $("composer"), composerNote: $("composer-note"), input: $("input"), send: $("send"),
-  deep: $("deep"), length: $("length"), layout: $("layout"), reader: $("reader"), readerBody: $("reader-body"),
+  reasoning: $("reasoning"), length: $("length"), layout: $("layout"), reader: $("reader"), readerBody: $("reader-body"),
   search: $("search"), searchForm: $("search-form"), dialog: $("models"), modelsList: $("models-list"),
   modelsIntro: $("models-intro"), announce: $("announce"), libraryBtn: $("library-btn"),
 };
@@ -474,7 +474,7 @@ async function ask(text) {
     const until = answered ? "before it answered" : stopped ? "before you stopped it" : "so far";
     reasonHead.textContent = !final ? (thoughts ? `${who}'s reasoning so far` : "No reasoning yet.")
       : thoughts ? `${who}'s reasoning ${until} · ${duration(thoughtMs)} of thinking`
-      : thinkSetting === false ? `${who} answered without reasoning first. Tick “Think harder” before you ask, and it reasons first (slower).`
+      : thinkSetting === false ? `${who} answered without reasoning first, because Reasoning is set to Off. Set it to Short or more before you ask, and it thinks first.`
       : thinkSetting === null ? `${who} doesn't reason before it answers, so there's nothing to show.`
       : "No reasoning to show for this answer.";
     reasoning.querySelector(".reasoning-note").textContent = thoughts
@@ -540,17 +540,24 @@ async function ask(text) {
     }
     const resp = await api("/api/chat", {
       method: "POST", signal: busy.signal,
-      body: JSON.stringify({ conversation, model, message: text, deep: els.deep.checked, length: els.length.value }),
+      body: JSON.stringify({ conversation, model, message: text, reasoning: els.reasoning.value, length: els.length.value }),
     });
     if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || `error ${resp.status}`);
     for await (const ev of events(resp)) {
       if (ev.type !== "thinking") endThought();
-      if (["search", "read", "show"].includes(ev.type)) {
-        if (answer) { answer = ""; render(); }  // text before a lookup is not the answer
-        reasonStep(ev);
+      if (["search", "read", "show", "retry"].includes(ev.type)) {
+        if (answer) { answer = ""; render(); }  // text before a lookup, or before it was asked again, is not the answer
+        if (ev.type !== "retry") reasonStep(ev);
       }
       if (ev.type === "thinking") think(ev.text);
-      else if (ev.type === "memory_check") memoryChecking(msg, true);
+      else if (ev.type === "think_limit") {  // its reasoning reached the Reasoning limit; told to answer from what it had
+        const said = `Its thinking reached the limit (${Number(ev.limit).toLocaleString()} tokens), so it answered from what it had.`;
+        note(said);
+        row("Limit", "r-step").textContent = said;
+      } else if (ev.type === "retry") {
+        note(ev.why === "search" ? "It answered from memory, so it was asked to search the library, as you asked."
+          : "It hadn't written an answer, so it was given the best articles it found and asked again.");
+      } else if (ev.type === "memory_check") memoryChecking(msg, true);
       else if (ev.type === "memory") changes.push(showRemembered(remembered, ev));
       else if (ev.type === "memory_failed") memoryNote(remembered, "Couldn't update memory this time.");
       else if (ev.type === "memory_unchanged") memoryNote(remembered, "Memory didn't change. You can edit it yourself:", true);
@@ -579,7 +586,9 @@ async function ask(text) {
         meta.textContent = ev.cut_off
           ? `${nameOf(model)} was stopped after ${secs} s because the answer reached the length limit. Keep going, or raise the limit below.`
           : ev.unfinished
-            ? `${nameOf(model)} kept looking things up and didn't finish an answer. Try asking again, or open the articles it read.`
+            ? (ev.sources?.length ? `${nameOf(model)} didn't finish an answer. Try asking again, or open the articles it read below.`
+              : ev.seen?.length ? `${nameOf(model)} didn't finish an answer. Try asking again, or open one of the search results below.`
+              : `${nameOf(model)} didn't write an answer. Try asking again.`)
             : `Answered by ${nameOf(model)} in ${secs} s`;
         meta.title = ev.seconds ? `${ev.tokens} tokens at ${Math.round(ev.tokens / ev.seconds)} tokens per second` : "";
         if (ev.cut_off) {
@@ -625,7 +634,7 @@ function showSources(el, ev) {
     el.insertAdjacentHTML("beforeend", `<div class="label">Sources it read · click to open</div>`);
     for (const s of read) el.appendChild(sourceButton(s, "The answer used this part", true));
   } else if (seen.length) {
-    el.insertAdjacentHTML("beforeend", `<div class="label">Found in the library · click to open</div>`);
+    el.insertAdjacentHTML("beforeend", `<div class="label">It searched, but didn't open any of these · click to read them</div>`);
     for (const s of seen.slice(0, 5)) el.appendChild(sourceButton(s, "This matched the search", true));
   } else if (state?.library) {
     el.insertAdjacentHTML("beforeend", `<div class="memory-note">This answer came from what the AI already knows, not the library,
@@ -791,7 +800,18 @@ els.input.onkeydown = (e) => {
 els.input.oninput = autosize;
 for (const b of document.querySelectorAll(".example")) b.onclick = () => ask(b.textContent);
 els.length.value = recall("length") || "normal";
-els.length.onchange = () => remember("length", els.length.value);
+els.reasoning.value = recall("reasoning") || "off";
+if (!els.reasoning.value) els.reasoning.value = "off";  // a value saved by a version with other choices
+const lengthNote = () => {  // warns when a limit is off: a stuck model then runs until Stop
+  const lines = [];
+  if (els.reasoning.value === "none") lines.push("With no reasoning limit, a model can get stuck reasoning in circles and keep going until you press Stop.");
+  if (els.length.value === "none") lines.push("With no length limit, a model stuck repeating itself keeps going until you press Stop.");
+  $("length-note").textContent = lines.join(" ");
+  $("length-note").hidden = !lines.length;
+};
+els.length.onchange = () => { remember("length", els.length.value); lengthNote(); };
+els.reasoning.onchange = () => { remember("reasoning", els.reasoning.value); lengthNote(); };
+lengthNote();
 els.searchForm.onsubmit = (e) => { e.preventDefault(); if (els.search.value.trim()) searchLibrary(els.search.value.trim()); };
 els.libraryBtn.onclick = () => { showReader(els.libraryBtn); els.search.focus(); };
 $("close-reader").onclick = hideReader;

@@ -150,7 +150,8 @@ def run(model):
                 done = {"answer": f"[error: {exc}]", "tokens": 0, "seconds": 0}
             row = {"q": item["q"], "answer": done.get("answer", ""), "secs": round(time.time() - start, 1),
                    "tokens": done.get("tokens", 0), "gen_secs": round(done.get("seconds", 0), 1),
-                   "events": events, **grade(item, done.get("answer", ""), events)}
+                   "events": events, **grade(item, done.get("answer", ""), events),
+                   **({"discarded": done["discarded"]} if done.get("discarded") is not None else {})}  # a no-answer's text
             rows.append(row)
             f.write(json.dumps(row) + "\n")
             f.flush()

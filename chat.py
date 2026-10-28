@@ -3,7 +3,8 @@
 Usage: chat.py [--model NAME] [question ...]   (default: the first chat model Ollama has)
 With a question it answers once and exits; without one it opens a chat.
 In a chat: /sources lists what the last answer used, /open N opens one, /reasoning shows its reasoning, /new,
-/think, /limit normal|long|none sets how long an answer may run, /bye.
+/think off|short|medium|long|none sets how much it may reason before answering, /limit normal|long|none sets how long
+an answer may run, /bye.
 """
 import os
 import subprocess
@@ -11,7 +12,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from core import LENGTH_LIMITS, capabilities, chat_events, installed_models, system_prompt, trim  # noqa: E402
+from core import LENGTH_LIMITS, REASONING_LIMITS, capabilities, chat_events, installed_models, system_prompt, trim  # noqa: E402
 from library.search import DB_PATH, Library  # noqa: E402
 
 DIM, BOLD, RESET = "\033[2m", "\033[1m", "\033[0m"
@@ -40,12 +41,12 @@ def open_article(library, passage_id):
     print(f"{DIM}  · opened: {doc['title']} ({doc['source']}){RESET}")
 
 
-def run_turn(model, library, messages, deep, caps, length="normal"):
+def run_turn(model, library, messages, level, caps, length="normal"):
     """Print one answer as it streams; returns the sources it used and its reasoning (for /reasoning)."""
     sources, reasoning = [], []  # reasoning: what it thought, with its lookups in between
     fresh = True  # nothing printed since the last lookup; skip the blank lines models emit before tool calls
     thinking, thoughts = False, 0  # in a stretch of reasoning; how many stretches
-    for ev in chat_events(model, library, messages, deep=deep, caps=caps, length=length):
+    for ev in chat_events(model, library, messages, reasoning=level, caps=caps, length=length):
         kind = ev["type"]
         if kind not in ("token", "tick"):
             fresh = True
@@ -65,6 +66,12 @@ def run_turn(model, library, messages, deep, caps, length="normal"):
         elif kind == "read":
             print(f"{DIM}  · reading: {ev['title']} ({ev['source']}){RESET}", flush=True)
             reasoning.append(f"· reading: {ev['title']} ({ev['source']})")
+        elif kind == "think_limit":
+            print(f"{DIM}  · its thinking reached the limit; answering from what it has{RESET}", flush=True)
+            reasoning.append("· thinking reached the limit")
+        elif kind == "retry":
+            print(f"{DIM}  · {'asked to search, as you asked' if ev.get('why') == 'search' else 'answering from the articles it found'}"
+                  f"{RESET}", flush=True)
         elif kind == "show":
             open_article(library, ev["id"])
             reasoning.append(f"· opened: {ev['title']} ({ev['source']})")
@@ -105,11 +112,11 @@ def main():
             library = None
     caps = capabilities(model)
     messages = [{"role": "system", "content": system_prompt(library, "tools" in caps)}]
-    deep, length = False, "normal"
+    level, length = "off", "normal"  # the Reasoning setting, and the length limit
 
     if args:  # one question, one answer
         messages.append({"role": "user", "content": " ".join(args)})
-        run_turn(model, library, messages, deep, caps)
+        run_turn(model, library, messages, level, caps)
         return
 
     try:
@@ -120,7 +127,7 @@ def main():
     lib_note = f"library: {docs:,} articles from {n_sources} sources" if library else "no library found"
     print(f"{BOLD}{model.removesuffix(':latest')}{RESET} {DIM}· offline · {lib_note}{RESET}")
     print(f"{DIM}Ask anything. /sources shows what the last answer read, /open N opens one, /reasoning shows how it "
-          f"reasoned, /new starts over, /think toggles deep thinking, /limit sets the answer length limit, /bye quits.{RESET}")
+          f"reasoned, /new starts over, /think sets how much it may reason, /limit sets the answer length limit, /bye quits.{RESET}")
     last_sources, last_reasoning = [], ""
     while True:
         try:
@@ -136,9 +143,15 @@ def main():
             messages, last_sources = messages[:1], []
             print(f"{DIM}Started over.{RESET}")
             continue
-        if question == "/think":
-            deep = not deep
-            print(f"{DIM}Deep thinking {'on (slower, more careful)' if deep else 'off'}.{RESET}")
+        if question.startswith("/think"):
+            pick = question[6:].strip()
+            if pick in REASONING_LIMITS:
+                level = pick
+                budget = REASONING_LIMITS[pick]
+                print(f"{DIM}Reasoning: {pick}" + (f" (up to {budget:,} tokens, then it answers)" if budget > 0 else
+                      " (no limit; Ctrl+C stops a model stuck reasoning in circles)" if budget < 0 else "") + f".{RESET}")
+            else:
+                print(f"{DIM}Use /think off, short, medium, long or none (now: {level}).{RESET}")
             continue
         if question.startswith("/limit"):
             pick = question[6:].strip()
@@ -170,7 +183,7 @@ def main():
         print()
         last_reasoning = ""
         try:
-            used, last_reasoning = run_turn(model, library, messages, deep, caps, length)
+            used, last_reasoning = run_turn(model, library, messages, level, caps, length)
             last_sources = used or last_sources
         except KeyboardInterrupt:
             print(f"\n{DIM}[stopped]{RESET}")

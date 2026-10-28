@@ -53,7 +53,14 @@
       <textarea id="input" rows="1" placeholder="Ask a question…" aria-label="Your question"></textarea>
       <div class="composer-row">
         <div class="options">
-          <label class="think"><input type="checkbox" id="deep"> Think harder (slower, more careful)</label>
+          <label class="think" title="How much the AI may think before it answers. At the limit its thinking is cut off and it answers from what it has. More thinking is slower, and often more careful. A token is about three quarters of a word. Qwen thinks a little even when this is Off.">Reasoning
+            <select id="reasoning">
+              <option value="off">Off</option>
+              <option value="short">Short (1,000 tokens)</option>
+              <option value="medium">Medium (4,000 tokens)</option>
+              <option value="long">Long (16,000 tokens)</option>
+              <option value="none">No limit</option>
+            </select></label>
           <label class="think" title="Normal stops an answer after about 6,000 words, Long after about 25,000. None never stops it on its own; use Stop if it gets stuck.">Length limit
             <select id="length">
               <option value="normal">Normal</option>
@@ -63,6 +70,7 @@
         </div>
         <button type="submit" id="send" aria-label="Send question">Send</button>
       </div>
+      <p id="length-note" class="length-note" role="note" hidden></p>
       <p class="footnote">AI can make mistakes. Check the sources.<span id="version-line" hidden> · <span id="version-text"></span>
         · <button id="updates-btn" class="link" type="button">Check for updates</button></span></p>
     </form>

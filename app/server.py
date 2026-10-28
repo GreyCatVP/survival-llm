@@ -1351,7 +1351,7 @@ class Handler(BaseHTTPRequestHandler):
         messages.append({"role": "user", "content": question})
         trim(messages)
         self._stream_start()
-        events = chat_events(model, library(), messages, deep=bool(body.get("deep")), caps=caps,
+        events = chat_events(model, library(), messages, reasoning=str(body.get("reasoning") or "off"), caps=caps,
                              length=str(body.get("length") or "normal"), memory=MEMORY)
         answered, last_tick = False, 0.0  # answered: the answer went out (a memory step may follow it)
         try:
